@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import auth, chat, search
+from backend.api import auth, chat, chat_v2, search
 from backend.core.config import get_settings
 
 settings = get_settings()
@@ -27,6 +27,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(chat.router)
+app.include_router(chat_v2.router)
 app.include_router(search.router)
 
 

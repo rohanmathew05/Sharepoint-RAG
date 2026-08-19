@@ -22,10 +22,12 @@ export async function sendChatMessage(
   question: string,
   history: ChatMessage[],
   getToken: () => Promise<string>,
-  demoUserId?: string
+  demoUserId?: string,
+  useLangGraph = false
 ): Promise<ChatResponse> {
   const headers = await authHeaders(getToken, demoUserId);
-  const res = await fetch(`${API_BASE}/chat`, {
+  const endpoint = useLangGraph ? `${API_BASE}/chat/v2` : `${API_BASE}/chat`;
+  const res = await fetch(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify({
