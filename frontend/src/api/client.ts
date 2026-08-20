@@ -16,25 +16,18 @@ export class ApiError extends Error {
 // network/validation error.
 export class SessionExpiredError extends ApiError {}
 
-async function authHeaders(getToken: () => Promise<string>, demoUserId?: string) {
-  const headers: Record<string, string> = {
+async function authHeaders(getToken: () => Promise<string>) {
+  const token = await getToken();
+  return {
     "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
   };
-  if (demoUserId) {
-    headers["X-Demo-User"] = demoUserId;
-    headers["Authorization"] = "Bearer demo-token";
-  } else {
-    const token = await getToken();
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
 }
 
 export async function sendChatMessage(
   question: string,
   history: ChatMessage[],
   getToken: () => Promise<string>,
-  demoUserId?: string,
   useLangGraph = false
 ): Promise<ChatResponse> {
   const endpoint = useLangGraph ? `${API_BASE}/chat/v2` : `${API_BASE}/chat`;
@@ -44,7 +37,7 @@ export async function sendChatMessage(
   });
 
   const attempt = async () => {
-    const headers = await authHeaders(getToken, demoUserId);
+    const headers = await authHeaders(getToken);
     return fetch(endpoint, { method: "POST", headers, body });
   };
 
@@ -55,7 +48,7 @@ export async function sendChatMessage(
   // MSAL to silently re-acquire a fresh token (or redirect to sign-in if
   // that's no longer possible — see App.tsx) — retry exactly once with
   // whatever it returns rather than surfacing a confusing error.
-  if (res.status === 401 && !demoUserId) {
+  if (res.status === 401) {
     res = await attempt();
   }
 

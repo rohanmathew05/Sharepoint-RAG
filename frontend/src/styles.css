@@ -35,36 +35,10 @@ body {
   gap: 12px;
 }
 
-.demo-badge {
-  background: #fff4ce;
-  color: #6b5000;
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-weight: 600;
-}
-
 .user-email {
   color: #605e5c;
   font-weight: normal;
   font-size: 13px;
-}
-
-.user-switcher {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.user-switcher select {
-  padding: 4px 8px;
-  border-radius: 4px;
-  border: 1px solid #c8c6c4;
-}
-
-.user-groups {
-  color: #605e5c;
 }
 
 .signout-btn,

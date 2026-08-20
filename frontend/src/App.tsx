@@ -6,28 +6,8 @@ import {
   useMsal,
 } from "@azure/msal-react";
 import { ChatWindow } from "./components/ChatWindow";
-import { UserSwitcher } from "./components/UserSwitcher";
-import { loginRequest, DEMO_MODE } from "./authConfig";
+import { loginRequest } from "./authConfig";
 import { clearAuthError, getLatestAuthError, subscribeAuthError } from "./authEvents";
-
-function DemoApp() {
-  const [demoUserId, setDemoUserId] = useState("user-a");
-
-  return (
-    <div className="app-shell">
-      <header className="app-header">
-        <h1>AI Assistant</h1>
-        <div className="header-right">
-          <span className="demo-badge">Demo mode</span>
-          <UserSwitcher currentUserId={demoUserId} onChange={setDemoUserId} />
-        </div>
-      </header>
-      <main className="app-main">
-        <ChatWindow getToken={async () => "demo-token"} demoUserId={demoUserId} />
-      </main>
-    </div>
-  );
-}
 
 function AuthenticatedApp() {
   const { instance, accounts } = useMsal();
@@ -123,10 +103,6 @@ function LoginScreen() {
 }
 
 export default function App() {
-  if (DEMO_MODE) {
-    return <DemoApp />;
-  }
-
   return (
     <>
       <AuthenticatedTemplate>

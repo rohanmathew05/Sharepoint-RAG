@@ -54,9 +54,9 @@ token, it never enters the prompt sent to Azure OpenAI, and it can never
 appear in the answer or its citations.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full request
-flow and [`docs/PERMISSIONS_DEMO.md`](docs/PERMISSIONS_DEMO.md) for a
-step-by-step demonstration of two users getting different results for the
-same question.
+flow. `docs/SETUP.md` covers setting up two test users with different
+SharePoint access to verify two users genuinely get different results
+for the same question.
 
 ## Project layout
 
@@ -70,28 +70,30 @@ backend/
 
 frontend/
 └── src/
-    ├── components/  # ChatWindow, MessageBubble, SourceCard, UserSwitcher
+    ├── components/  # ChatWindow, MessageBubble, SourceCard, FileTypeIcon
     ├── api/         # backend API client
     └── App.tsx
 ```
 
-## Running locally (no Azure tenant required)
+## Setup and running
 
-The project ships with `DEMO_MODE=true`, which uses local fixture
-SharePoint data and two demo users instead of live Entra ID / Graph /
-Azure OpenAI — so you can see the whole permission model working
-end-to-end with zero cloud setup.
+This app always talks to real Microsoft Entra ID, Microsoft Graph, and
+Azure OpenAI — there's no local/offline mode. See
+[`docs/SETUP.md`](docs/SETUP.md) for the full walkthrough:
+- Registering an Entra ID app with delegated Graph permissions
+- Configuring the OBO flow (client secret, API exposure, scopes)
+- Azure OpenAI environment variables
+- Setting up two test users with different SharePoint access, to verify
+  the permission model for real
 
-**Backend**
-
-Run these from the **repo root** (not from inside `backend/`) — the code
-uses absolute imports like `from backend.api import ...`, which need the
-repo root on `sys.path`, not `backend/` itself:
+**Backend** (from the repo root — the code uses absolute imports like
+`from backend.api import ...`, which need the repo root on `sys.path`,
+not `backend/` itself):
 
 ```bash
 python -m venv backend/.venv && source backend/.venv/bin/activate
 pip install -r backend/requirements.txt
-cp backend/.env.example backend/.env
+cp backend/.env.example backend/.env   # then fill in real credentials
 uvicorn backend.main:app --reload --port 8000
 ```
 
@@ -103,20 +105,9 @@ the `source` line.)
 ```bash
 cd frontend
 npm install
+cp .env.example .env.local   # then fill in your Entra ID app details
 npm run dev
 ```
-
-Open http://localhost:5173, use the "Signed in as" dropdown to switch
-between User A and User B, and ask the same question as each — see
-[`docs/PERMISSIONS_DEMO.md`](docs/PERMISSIONS_DEMO.md) for exact examples.
-
-## Running against real Microsoft Entra ID / Graph / Azure OpenAI
-
-See [`docs/SETUP.md`](docs/SETUP.md) for:
-- Registering an Entra ID app with delegated Graph permissions
-- Configuring the OBO flow (client secret, API exposure, scopes)
-- Azure OpenAI environment variables
-- Setting `DEMO_MODE=false`
 
 ## Security properties this project demonstrates
 

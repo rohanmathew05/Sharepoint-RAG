@@ -56,19 +56,14 @@ MAX_RETRIES = 2
 
 logger = logging.getLogger("backend.services.langgraph_pipeline")
 
-# A tiny stand-in for "ask the LLM to rewrite the query" — broadens the
-# query by dropping the least-specific leading word so a second search
-# attempt can surface partial matches. Real deployments should replace
-# this with an Azure OpenAI call (see _llm_rewrite_query below).
-_GENERIC_LEADING_WORDS = {"what", "how", "when", "where", "is", "are", "does", "the", "a"}
-
-# DEMO_MODE stand-in for _classify_intent's real Azure OpenAI call (see
+# _classify_intent's primary path is a real Azure OpenAI call (see
 # AzureOpenAIService.classify_needs_retrieval) — a fixed word-list can't
 # make judgment calls the way a classifier can ("what's the deadline"
-# vs. "what's up"), but it's free and deterministic, which is what the
-# demo needs. Matched against the whole message, not as a substring, so
-# a real question that happens to contain "hi" (e.g. "hi-vis vest
-# requirements") isn't misclassified.
+# vs. "what's up"). This set is only the resilience fallback for when
+# that call itself fails, so a classifier hiccup doesn't at least miss
+# the obvious greetings. Matched against the whole message, not as a
+# substring, so a real question that happens to contain "hi" (e.g.
+# "hi-vis vest requirements") isn't misclassified.
 _CHITCHAT_MESSAGES = {
     "hi", "hello", "hey", "hiya", "yo", "howdy",
     "thanks", "thank you", "thx", "cheers",
@@ -157,19 +152,18 @@ class LangGraphRAGService:
         # search API, which (correctly, per its own relevance ranking)
         # still returns *some* document for almost any query string,
         # producing citations that have nothing to do with what was
-        # actually asked. Real deployments use an actual (cheap, capped)
-        # LLM call for this rather than a fixed word-list, since intent
-        # is a judgment call a classifier handles better than an exact
-        # match ever could.
+        # actually asked. This is a real (cheap, capped) LLM call rather
+        # than a fixed word-list, since intent is a judgment call a
+        # classifier handles better than an exact match ever could.
         question = state["question"]
-        if self.settings.DEMO_MODE:
+        try:
+            needs_retrieval = await self.llm.classify_needs_retrieval(question)
+        except Exception:
+            # Fall back to the heuristic rather than blindly defaulting
+            # to "search" — still catches the obvious greetings even
+            # when the classifier call itself is unavailable.
+            logger.warning("Intent classification failed; falling back to heuristic", exc_info=True)
             needs_retrieval = not _is_chitchat(question)
-        else:
-            try:
-                needs_retrieval = await self.llm.classify_needs_retrieval(question)
-            except Exception:
-                logger.warning("Intent classification failed; defaulting to search", exc_info=True)
-                needs_retrieval = True
         logger.info("Intent classification: question=%r needs_retrieval=%s", question, needs_retrieval)
         return {"needs_retrieval": needs_retrieval}
 
@@ -225,27 +219,16 @@ class LangGraphRAGService:
     # --- helpers -----------------------------------------------------------
 
     async def _llm_rewrite_query(self, original_question: str, previous_query: str) -> str:
-        if not self.settings.DEMO_MODE:
-            # Real deployment: ask Azure OpenAI for a broader/alternate
-            # phrasing of the search query.
-            prompt_context = (
-                f'The search "{previous_query}" returned no relevant SharePoint '
-                f'results for the question "{original_question}". Suggest a '
-                "broader or differently-phrased search query (respond with "
-                "just the query, no explanation)."
-            )
-            rewritten = await self.llm.generate_answer(question=prompt_context, context="")
-            return rewritten.strip().strip('"') or previous_query
-
-        # DEMO_MODE fallback: drop generic leading words and keep dropping
-        # one word per attempt so the second search is broader than the
-        # first, without needing a live LLM call.
-        words = previous_query.split()
-        while words and words[0].lower().strip("?.,!") in _GENERIC_LEADING_WORDS:
-            words.pop(0)
-        if len(words) > 1:
-            words.pop(0)
-        return " ".join(words) or original_question
+        # Ask Azure OpenAI for a broader/alternate phrasing of the search
+        # query when the previous attempt came back empty.
+        prompt_context = (
+            f'The search "{previous_query}" returned no relevant SharePoint '
+            f'results for the question "{original_question}". Suggest a '
+            "broader or differently-phrased search query (respond with "
+            "just the query, no explanation)."
+        )
+        rewritten = await self.llm.generate_answer(question=prompt_context, context="")
+        return rewritten.strip().strip('"') or previous_query
 
     def _build_context(self, documents: list[SourceDocument]) -> str:
         parts = []

@@ -1,9 +1,11 @@
-"""Verifies the LangGraph V2 pipeline still respects permission boundaries
-even though it retries with a rewritten query, and that it actually
-retries when the first search comes back empty."""
+"""Verifies the LangGraph V2 pipeline's own logic — intent classification,
+retry/rewrite mechanics, and permission-token passthrough — with the
+SharePoint/Azure OpenAI calls mocked out. Permission enforcement itself
+is Microsoft Graph's job (see backend/tests/test_graph_service.py for
+proof the delegated token is passed straight through); there is no
+application-level ACL logic left in this codebase to test."""
 import pytest
 
-from backend.core.config import get_settings
 from backend.models.auth import UserContext
 from backend.services.langgraph_pipeline import LangGraphRAGService, _is_chitchat
 
@@ -11,40 +13,8 @@ USER_A = UserContext(
     oid="00000000-0000-0000-0000-0000000000a1",
     upn="user.a@contoso.com",
     name="User A",
-    tenant_id="demo-tenant",
+    tenant_id="test-tenant",
 )
-USER_B = UserContext(
-    oid="00000000-0000-0000-0000-0000000000b1",
-    upn="user.b@contoso.com",
-    name="User B",
-    tenant_id="demo-tenant",
-)
-
-
-@pytest.mark.asyncio
-async def test_user_a_gets_no_engineering_citations_even_after_retries():
-    service = LangGraphRAGService()
-    response = await service.answer_question(USER_A, "What are the pump specifications?")
-    assert response.citations == []
-    # Should have retried at least once (rewritten query) before giving up.
-    assert response.retrieval_attempts >= 2
-
-
-@pytest.mark.asyncio
-async def test_user_b_gets_engineering_citations_on_first_attempt():
-    service = LangGraphRAGService()
-    response = await service.answer_question(USER_B, "What are the pump specifications?")
-    names = {c.document_name for c in response.citations}
-    assert "Pump Specifications.pdf" in names
-    assert response.retrieval_attempts == 1
-
-
-@pytest.mark.asyncio
-async def test_no_user_ever_gets_hr_citations_via_v2():
-    service = LangGraphRAGService()
-    for user in (USER_A, USER_B):
-        response = await service.answer_question(user, "What are the salary bands and market benchmarks?")
-        assert response.citations == []
 
 
 @pytest.mark.parametrize(
@@ -67,40 +37,14 @@ def test_real_questions_are_not_chitchat(message):
 
 
 @pytest.mark.asyncio
-async def test_greeting_skips_search_entirely():
-    service = LangGraphRAGService()
-    response = await service.answer_question(USER_A, "hello")
-    assert response.citations == []
-    assert response.retrieval_attempts == 0
-
-
-@pytest.mark.asyncio
-async def test_real_question_still_searches():
-    service = LangGraphRAGService()
-    response = await service.answer_question(USER_A, "What PPE is required for confined space work?")
-    assert response.retrieval_attempts >= 1
-    assert len(response.citations) > 0
-
-
-@pytest.fixture
-def real_mode(monkeypatch):
-    """These tests exercise the real (non-demo) intent-classification
-    path, mocking the LLM/search calls so nothing actually reaches
-    Azure OpenAI or Microsoft Graph."""
-    settings = get_settings()
-    monkeypatch.setattr(settings, "DEMO_MODE", False)
-    yield settings
-
-
-@pytest.mark.asyncio
-async def test_real_mode_llm_says_chitchat_skips_search(monkeypatch, real_mode):
+async def test_llm_says_chitchat_skips_search_entirely(monkeypatch):
     service = LangGraphRAGService()
 
     async def fake_classify(question: str) -> bool:
         return False  # LLM verdict: CHITCHAT
 
     async def fail_if_called(*args, **kwargs):
-        raise AssertionError("search should not be reached when LLM says chitchat")
+        raise AssertionError("search should not be reached when the LLM says chitchat")
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fail_if_called)
@@ -111,7 +55,7 @@ async def test_real_mode_llm_says_chitchat_skips_search(monkeypatch, real_mode):
 
 
 @pytest.mark.asyncio
-async def test_real_mode_llm_says_search_triggers_retrieval(monkeypatch, real_mode):
+async def test_llm_says_search_triggers_retrieval(monkeypatch):
     service = LangGraphRAGService()
 
     async def fake_classify(question: str) -> bool:
@@ -132,7 +76,27 @@ async def test_real_mode_llm_says_search_triggers_retrieval(monkeypatch, real_mo
 
 
 @pytest.mark.asyncio
-async def test_real_mode_classification_failure_defaults_to_search(monkeypatch, real_mode):
+async def test_classification_failure_falls_back_to_heuristic(monkeypatch):
+    service = LangGraphRAGService()
+
+    async def broken_classify(question: str) -> bool:
+        raise RuntimeError("Azure OpenAI had a bad day")
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("search should not be reached for an obvious greeting")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fail_if_called)
+
+    # A genuine greeting should still be caught by the heuristic fallback
+    # even though the classifier call itself failed.
+    response = await service.answer_question(USER_A, "hello")
+    assert response.citations == []
+    assert response.retrieval_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_classification_failure_on_real_question_still_searches(monkeypatch):
     service = LangGraphRAGService()
 
     async def broken_classify(question: str) -> bool:
@@ -148,7 +112,111 @@ async def test_real_mode_classification_failure_defaults_to_search(monkeypatch, 
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
 
-    # Should not raise, and should still have attempted a search rather
-    # than silently skipping it.
+    # Not a greeting, so the heuristic fallback should still trigger a
+    # search rather than silently skipping a real question.
     response = await service.answer_question(USER_A, "what are the coordinates")
     assert response.retrieval_attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
+    """Exercises the retry loop itself: first search comes back empty,
+    the query gets rewritten, the second search finds something."""
+    service = LangGraphRAGService()
+    search_calls: list[str] = []
+
+    from backend.models.documents import SourceDocument
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        if len(search_calls) == 1:
+            return []
+        return [
+            SourceDocument(
+                document_id="doc-1",
+                document_name="Pump Specifications.pdf",
+                web_url="https://contoso.sharepoint.com/pump-specs.pdf",
+                relevant_content="Model P-450 centrifugal pump specs.",
+            )
+        ]
+
+    async def fake_generate_answer(question, context):
+        return "Based on the documents: Model P-450."
+
+    async def fake_rewrite(original_question, previous_query):
+        return "pump specifications"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+
+    response = await service.answer_question(USER_A, "what's the pump spec sheet say")
+
+    assert len(search_calls) == 2
+    assert response.retrieval_attempts == 2
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "Pump Specifications.pdf"
+
+
+@pytest.mark.asyncio
+async def test_retries_are_capped_by_max_retries(monkeypatch):
+    service = LangGraphRAGService()
+    search_calls: list[str] = []
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        return []  # never finds anything
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    async def fake_rewrite(original_question, previous_query):
+        return f"{previous_query} broader"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+
+    response = await service.answer_question(USER_A, "something nobody has")
+
+    from backend.services.langgraph_pipeline import MAX_RETRIES
+
+    assert len(search_calls) == MAX_RETRIES
+    assert response.citations == []
+
+
+@pytest.mark.asyncio
+async def test_delegated_token_search_is_the_only_permission_boundary(monkeypatch):
+    """The pipeline itself does no filtering — SharePointService.search()
+    is called with the user object as-is, and Microsoft Graph (via the
+    OBO-derived token) is what decides what comes back. This just proves
+    the pipeline passes the real user through unmodified."""
+    service = LangGraphRAGService()
+    received_users = []
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        received_users.append(user)
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    await service.answer_question(USER_A, "what are the coordinates")
+
+    assert len(received_users) >= 1
+    assert all(u is USER_A for u in received_users)

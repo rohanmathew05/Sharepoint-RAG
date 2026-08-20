@@ -60,23 +60,22 @@ doesn't require a strong match) — without this check, a message like
 "hello" reached SharePoint search and came back with citations that had
 nothing to do with what was actually asked.
 
-In a real deployment, the classification itself is a genuine (tiny) LLM
-call — `AzureOpenAIService.classify_needs_retrieval`, capped at
-`max_tokens=10` and `temperature=0` since the entire response is meant
-to be one word (`SEARCH` or `CHITCHAT`). Intent is a judgment call a
-classifier handles better than a fixed word-list ever could ("what's
-the deadline" vs. "what's up"), and at ~10 output tokens it costs a
-small fraction of an actual generation call. If that call fails for any
-reason, `_classify_intent` logs a warning and defaults to `SEARCH` — an
-unnecessary search is a much smaller failure than silently refusing to
-look something up.
+The classification itself is a genuine (tiny) LLM call —
+`AzureOpenAIService.classify_needs_retrieval`, capped at `max_tokens=10`
+and `temperature=0` since the entire response is meant to be one word
+(`SEARCH` or `CHITCHAT`). Intent is a judgment call a classifier handles
+better than a fixed word-list ever could ("what's the deadline" vs.
+"what's up"), and at ~10 output tokens it costs a small fraction of an
+actual generation call.
 
-`DEMO_MODE` never calls a live API for this (same as query rewriting —
-see `_llm_rewrite_query`), so it falls back to `_is_chitchat`: an exact
-match against a small greeting/chitchat set, never a substring match,
-so a real question that happens to contain a greeting-like word
-("hi-vis vest requirements") isn't misclassified. Either path routes
-chitchat to a canned reply with no Graph call at all.
+If that call fails for any reason, `_classify_intent` falls back to
+`_is_chitchat`: an exact match against a small greeting/chitchat set,
+never a substring match, so a real question that happens to contain a
+greeting-like word ("hi-vis vest requirements") isn't misclassified.
+This is resilience for a failed classifier call, not a demo mode — this
+app always talks to real Azure OpenAI/Graph, there is no offline path.
+Either outcome routes chitchat to a canned reply with no Graph call at
+all.
 
 ## Where each requirement from the spec is implemented
 
@@ -100,25 +99,26 @@ the graph's purpose — better retrieval, not a bigger tech list — clear.
 `_search` calls the exact same `SharePointService.search()` as V1, which
 always requires an OBO-derived Graph token scoped to the requesting user
 (`backend/auth/obo.py`). Rewriting the query changes *what* is searched
-for, never *who* the search runs as. `backend/tests/test_langgraph_pipeline.py`
-asserts this directly: a user without Engineering access still gets zero
-citations from a pump-specification question after two rewritten search
-attempts, while a user with access gets citations on the first attempt.
+for, never *who* the search runs as — the pipeline itself does no
+filtering; `test_delegated_token_search_is_the_only_permission_boundary`
+in `backend/tests/test_langgraph_pipeline.py` asserts the user object is
+passed through to `SharePointService.search()` unmodified. Whether two
+different users actually get different results is Microsoft Graph's
+call at request time, not something unit-testable without a real
+tenant — see `docs/SETUP.md`'s "Set up two test users" section to
+verify it for real.
 
 ## Trying it
 
 ```bash
-# same DEMO_MODE setup as the root README
 curl -X POST http://localhost:8000/api/chat/v2 \
   -H "Content-Type: application/json" \
-  -H "X-Demo-User: user-a" \
-  -H "Authorization: Bearer demo-token" \
+  -H "Authorization: Bearer <your Entra ID access token>" \
   -d '{"question": "What are the pump specifications?"}'
 ```
 
-Response includes `retrieval_attempts` — for User A (no Engineering
-access) this will be `2` (one rewrite, still no results); for User B it
-will be `1`.
+Response includes `retrieval_attempts` — `1` if the first search found
+something relevant, higher if it had to rewrite and retry.
 
 In the frontend, tick "Use LangGraph pipeline" above the chat input to
 route requests to `/api/chat/v2` instead of `/api/chat`.
