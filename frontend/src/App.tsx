@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { EventType, InteractionRequiredAuthError } from "@azure/msal-browser";
-import type { EventMessage } from "@azure/msal-browser";
+import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import {
   AuthenticatedTemplate,
   UnauthenticatedTemplate,
@@ -9,6 +8,7 @@ import {
 import { ChatWindow } from "./components/ChatWindow";
 import { UserSwitcher } from "./components/UserSwitcher";
 import { loginRequest, DEMO_MODE } from "./authConfig";
+import { clearAuthError, getLatestAuthError, subscribeAuthError } from "./authEvents";
 
 function DemoApp() {
   const [demoUserId, setDemoUserId] = useState("user-a");
@@ -69,25 +69,12 @@ function AuthenticatedApp() {
 
 function LoginScreen() {
   const { instance } = useMsal();
-  const [authError, setAuthError] = useState<string | null>(null);
+  // getLatestAuthError() picks up a failure that already happened before
+  // this component mounted (e.g. during the redirect-back bootstrap in
+  // main.tsx) — see authEvents.ts for why that matters.
+  const [authError, setAuthError] = useState<string | null>(getLatestAuthError());
 
-  useEffect(() => {
-    // handleRedirectPromise() (run internally by MsalProvider) rejects
-    // silently as far as the UI is concerned if the redirect back from
-    // Entra ID carried an error instead of a token — e.g. admin consent
-    // not granted for the app's scope, or the redirect URI's platform
-    // type isn't "Single-page application". Without this, that failure
-    // just bounces the user back to this same login screen with no clue
-    // why. Surface it instead.
-    const callbackId = instance.addEventCallback((event: EventMessage) => {
-      if (event.eventType === EventType.LOGIN_FAILURE || event.eventType === EventType.ACQUIRE_TOKEN_FAILURE) {
-        setAuthError(event.error?.message ?? "Sign-in failed for an unknown reason.");
-      }
-    });
-    return () => {
-      if (callbackId) instance.removeEventCallback(callbackId);
-    };
-  }, [instance]);
+  useEffect(() => subscribeAuthError(setAuthError), []);
 
   return (
     <div className="login-screen">
@@ -105,7 +92,7 @@ function LoginScreen() {
       <button
         className="login-btn"
         onClick={() => {
-          setAuthError(null);
+          clearAuthError();
           instance.loginRedirect(loginRequest);
         }}
       >
