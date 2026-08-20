@@ -30,6 +30,10 @@ class SourceDocument(BaseModel):
         default="", description="Snippet or extracted text used as RAG context"
     )
     last_modified: str | None = None
+    is_folder: bool = False
+    folder_path: str = Field(
+        default="", description="Breadcrumb-style path to the item's parent folder"
+    )
 
 
 class Citation(BaseModel):
@@ -38,3 +42,5 @@ class Citation(BaseModel):
     document_id: str
     document_name: str
     web_url: str
+    is_folder: bool = False
+    folder_path: str = ""

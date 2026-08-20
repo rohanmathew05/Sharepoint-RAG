@@ -15,7 +15,7 @@ import jwt
 
 from backend.core.config import get_settings
 from backend.models.documents import DriveInfo, SiteInfo, SourceDocument
-from backend.services.url_utils import as_browser_viewable_url
+from backend.services.url_utils import as_browser_viewable_url, folder_path_from_web_url
 
 GRAPH_SEARCH_URL = "https://graph.microsoft.com/v1.0/search/query"
 
@@ -138,11 +138,15 @@ class GraphService:
             for hit in container.get("hits", []):
                 resource = hit.get("resource", {})
                 parent = resource.get("parentReference", {})
+                raw_web_url = resource.get("webUrl", "")
+                # A driveItem has either a "file" or a "folder" facet —
+                # Graph search can match folder names too, not just files.
+                is_folder = "folder" in resource
                 results.append(
                     SourceDocument(
                         document_id=resource.get("id", ""),
                         document_name=resource.get("name", "Untitled"),
-                        web_url=as_browser_viewable_url(resource.get("webUrl", "")),
+                        web_url=as_browser_viewable_url(raw_web_url),
                         site=SiteInfo(
                             site_id=parent.get("siteId", ""),
                             site_name=parent.get("siteId", ""),
@@ -158,6 +162,8 @@ class GraphService:
                         else None,
                         relevant_content=hit.get("summary", ""),
                         last_modified=resource.get("lastModifiedDateTime"),
+                        is_folder=is_folder,
+                        folder_path=folder_path_from_web_url(raw_web_url, is_folder),
                     )
                 )
         logger.info(

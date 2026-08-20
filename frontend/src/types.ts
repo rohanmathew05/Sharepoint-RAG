@@ -2,6 +2,8 @@ export interface Citation {
   document_id: string;
   document_name: string;
   web_url: string;
+  is_folder: boolean;
+  folder_path: string;
 }
 
 export interface ChatMessage {

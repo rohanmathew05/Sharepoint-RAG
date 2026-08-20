@@ -31,16 +31,19 @@ _DRIVE = DriveInfo(drive_id="drive1", drive_name="Documents")
 
 
 def _doc(doc_id: str, name: str, group: str, content: str) -> dict:
+    group_folder = group.replace(" & ", "").replace(" ", "")
     return {
         "group": group,
         "document": SourceDocument(
             document_id=doc_id,
             document_name=name,
-            web_url=f"https://contoso.sharepoint.com/sites/intranet/{group.replace(' & ', '').replace(' ', '')}/{name.replace(' ', '%20')}",
+            web_url=f"https://contoso.sharepoint.com/sites/intranet/{group_folder}/{name.replace(' ', '%20')}",
             site=_SITE,
             drive=_DRIVE,
             relevant_content=content,
             last_modified="2026-06-01T00:00:00Z",
+            is_folder=False,
+            folder_path=f"Shared Documents / {group}",
         ),
     }
 

@@ -53,6 +53,8 @@ class RAGService:
                 document_id=doc.document_id,
                 document_name=doc.document_name,
                 web_url=doc.web_url,
+                is_folder=doc.is_folder,
+                folder_path=doc.folder_path,
             )
             for doc in documents
         ]
