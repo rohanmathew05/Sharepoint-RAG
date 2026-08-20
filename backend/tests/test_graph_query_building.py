@@ -1,29 +1,25 @@
-"""Verifies natural-language questions get turned into a Graph/KQL query
-that actually has a chance of matching real documents, instead of being
-sent verbatim (which defaults to AND-ing every word in the sentence)."""
+"""Graph's own relevance ranking handles full natural-language questions
+well (confirmed against real content — see graph.py's _build_kql_query
+docstring for what changed and why); this just guards against
+regressing back to the stopword-stripping/OR-joining that turned out to
+hurt results rather than help them."""
 from backend.services.graph import _build_kql_query
 
 
-def test_strips_stopwords_and_ors_remaining_keywords():
-    result = _build_kql_query("What date was the last site in Tullylost done?")
-    assert result == "date OR site OR Tullylost"
+def test_passes_question_through_unchanged():
+    question = "What date was the last site in Tullylost done?"
+    assert _build_kql_query(question) == question
 
 
-def test_ors_keywords_with_or_keyword():
-    result = _build_kql_query("What are the coordinates for Neilstown Community Centre?")
-    assert " OR " in result
-    for keyword in ["coordinates", "Neilstown", "Community", "Centre"]:
-        assert keyword in result
+def test_trims_surrounding_whitespace():
+    assert _build_kql_query("  confined space PPE  ") == "confined space PPE"
 
 
-def test_falls_back_to_original_question_if_all_stopwords():
-    result = _build_kql_query("What is this and that?")
-    assert result == "What is this and that?"
-
-
-def test_no_and_semantics_leak_through():
-    # KQL treats bare space-separated terms as AND by default — every
-    # remaining keyword must be joined with an explicit OR so a document
-    # only needs to match one of them, not all.
-    result = _build_kql_query("confined space PPE requirements")
-    assert result == "confined OR space OR PPE OR requirements"
+def test_does_not_strip_stopwords_or_inject_or():
+    # Regression guard: an earlier version stripped words like "how",
+    # "many", "the" and joined the rest with " OR ", which discarded
+    # phrase context Graph's own ranking otherwise uses well.
+    question = "How many sites are in the UE PCV Survey folder?"
+    result = _build_kql_query(question)
+    assert result == question
+    assert " OR " not in result

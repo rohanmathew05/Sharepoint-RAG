@@ -21,38 +21,20 @@ GRAPH_SEARCH_URL = "https://graph.microsoft.com/v1.0/search/query"
 
 logger = logging.getLogger("backend.services.graph")
 
-# Question words / filler that add nothing as search terms and, worse,
-# actively hurt recall: KQL (the query language behind Graph's Search
-# API) defaults to AND between bare terms, so passing a raw natural-
-# language question straight through requires every one of these common
-# words to also appear in the matching document — which is why "what
-# date was the last site in X done?" was reliably returning zero hits
-# for real content that plainly discusses X.
-_STOPWORDS = {
-    "the", "and", "for", "are", "what", "when", "where", "how", "does",
-    "did", "do", "with", "that", "this", "have", "has", "can", "you",
-    "your", "all", "any", "who", "why", "was", "were", "which", "our",
-    "about", "please", "tell", "show", "me", "was", "in", "on", "of",
-    "to", "a", "is", "it", "last", "done",
-}
-
-
 def _build_kql_query(question: str) -> str:
-    """Turns a natural-language question into a Graph/KQL search string:
-    strips stopwords, then OR's the remaining keywords together so a
-    document needs to match at least one of them rather than the entire
-    sentence verbatim. Graph still relevance-ranks OR results, so the
-    best matches surface first even though recall is intentionally
-    looser than the default AND behavior.
+    """Passes the question through to Graph's Search API almost as-is.
+
+    An earlier version of this function stripped stopwords and OR'd the
+    remaining keywords together, on the theory that KQL defaults to
+    AND-ing bare terms and a full sentence would rarely match anything.
+    That theory turned out to be wrong: Graph's relevance ranking handles
+    full natural-language queries well on its own (confirmed against
+    real content — a full question returned hundreds of sensibly-ranked
+    hits), and forcibly OR-ing individual keywords together throws away
+    whatever phrase/proximity signal Graph's own ranking was using,
+    likely making results *worse*, not better. Only trim whitespace.
     """
-    keywords = [
-        w.strip('?.,!"\'')
-        for w in question.split()
-        if len(w) > 2 and w.strip('?.,!"\'').lower() not in _STOPWORDS
-    ]
-    if not keywords:
-        return question
-    return " OR ".join(keywords)
+    return question.strip()
 
 
 def _log_token_scopes(token: str) -> None:
