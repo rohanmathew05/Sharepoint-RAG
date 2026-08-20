@@ -106,14 +106,6 @@ class GraphService:
                     "query": {"queryString": kql_query},
                     "from": 0,
                     "size": size,
-                    "fields": [
-                        "id",
-                        "name",
-                        "webUrl",
-                        "lastModifiedDateTime",
-                        "parentReference",
-                        "siteId",
-                    ],
                 }
             ]
         }
