@@ -44,6 +44,12 @@ body {
   font-weight: 600;
 }
 
+.user-email {
+  color: #605e5c;
+  font-weight: normal;
+  font-size: 13px;
+}
+
 .user-switcher {
   display: flex;
   align-items: center;
