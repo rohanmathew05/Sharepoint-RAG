@@ -1,4 +1,7 @@
 """FastAPI application entrypoint."""
+import logging
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,6 +10,16 @@ from backend.api import auth, chat, search
 from backend.auth.obo import OBOExchangeError, OBOTokenExpiredError
 from backend.core.config import get_settings
 from backend.services.graph import GraphAPIError
+
+# uvicorn configures its own loggers (uvicorn.*) but not the root logger,
+# so app-level `logging.getLogger(__name__)` calls (e.g. in
+# services/graph.py) go nowhere by default. This makes them show up in
+# the same console. Set LOG_LEVEL=DEBUG to also see raw Graph response
+# bodies (backend/services/graph.py's per-request debug logging).
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 settings = get_settings()
 
