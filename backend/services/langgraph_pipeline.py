@@ -137,7 +137,13 @@ class LangGraphRAGService:
         context = self._build_context(documents)
         answer = await self.llm.generate_answer(question=state["question"], context=context)
         citations = [
-            Citation(document_id=d.document_id, document_name=d.document_name, web_url=d.web_url)
+            Citation(
+                document_id=d.document_id,
+                document_name=d.document_name,
+                web_url=d.web_url,
+                is_folder=d.is_folder,
+                folder_path=d.folder_path,
+            )
             for d in documents
         ]
         return {"answer": answer, "citations": citations}
