@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { InteractionRequiredAuthError } from "@azure/msal-browser";
+import { useEffect, useState } from "react";
+import { EventType, InteractionRequiredAuthError } from "@azure/msal-browser";
+import type { EventMessage } from "@azure/msal-browser";
 import {
   AuthenticatedTemplate,
   UnauthenticatedTemplate,
@@ -68,11 +69,46 @@ function AuthenticatedApp() {
 
 function LoginScreen() {
   const { instance } = useMsal();
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // handleRedirectPromise() (run internally by MsalProvider) rejects
+    // silently as far as the UI is concerned if the redirect back from
+    // Entra ID carried an error instead of a token — e.g. admin consent
+    // not granted for the app's scope, or the redirect URI's platform
+    // type isn't "Single-page application". Without this, that failure
+    // just bounces the user back to this same login screen with no clue
+    // why. Surface it instead.
+    const callbackId = instance.addEventCallback((event: EventMessage) => {
+      if (event.eventType === EventType.LOGIN_FAILURE || event.eventType === EventType.ACQUIRE_TOKEN_FAILURE) {
+        setAuthError(event.error?.message ?? "Sign-in failed for an unknown reason.");
+      }
+    });
+    return () => {
+      if (callbackId) instance.removeEventCallback(callbackId);
+    };
+  }, [instance]);
+
   return (
     <div className="login-screen">
       <h1>SharePoint AI Assistant</h1>
       <p>Sign in with your Microsoft work account to get started.</p>
-      <button className="login-btn" onClick={() => instance.loginRedirect(loginRequest)}>
+      {authError && (
+        <p className="auth-error">
+          Sign-in failed: {authError}
+          <br />
+          Common causes: admin consent not granted for the app's exposed
+          API scope, or the redirect URI is registered under "Web"
+          instead of "Single-page application" in Entra ID.
+        </p>
+      )}
+      <button
+        className="login-btn"
+        onClick={() => {
+          setAuthError(null);
+          instance.loginRedirect(loginRequest);
+        }}
+      >
         Sign in with Microsoft
       </button>
     </div>

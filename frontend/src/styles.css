@@ -263,3 +263,13 @@ body {
   text-align: center;
   gap: 12px;
 }
+
+.auth-error {
+  max-width: 480px;
+  background: #fde7e9;
+  color: #a80000;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
