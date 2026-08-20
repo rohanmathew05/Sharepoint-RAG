@@ -19,6 +19,39 @@ GRAPH_SEARCH_URL = "https://graph.microsoft.com/v1.0/search/query"
 
 logger = logging.getLogger("backend.services.graph")
 
+# Question words / filler that add nothing as search terms and, worse,
+# actively hurt recall: KQL (the query language behind Graph's Search
+# API) defaults to AND between bare terms, so passing a raw natural-
+# language question straight through requires every one of these common
+# words to also appear in the matching document — which is why "what
+# date was the last site in X done?" was reliably returning zero hits
+# for real content that plainly discusses X.
+_STOPWORDS = {
+    "the", "and", "for", "are", "what", "when", "where", "how", "does",
+    "did", "do", "with", "that", "this", "have", "has", "can", "you",
+    "your", "all", "any", "who", "why", "was", "were", "which", "our",
+    "about", "please", "tell", "show", "me", "was", "in", "on", "of",
+    "to", "a", "is", "it", "last", "done",
+}
+
+
+def _build_kql_query(question: str) -> str:
+    """Turns a natural-language question into a Graph/KQL search string:
+    strips stopwords, then OR's the remaining keywords together so a
+    document needs to match at least one of them rather than the entire
+    sentence verbatim. Graph still relevance-ranks OR results, so the
+    best matches surface first even though recall is intentionally
+    looser than the default AND behavior.
+    """
+    keywords = [
+        w.strip('?.,!"\'')
+        for w in question.split()
+        if len(w) > 2 and w.strip('?.,!"\'').lower() not in _STOPWORDS
+    ]
+    if not keywords:
+        return question
+    return " OR ".join(keywords)
+
 
 class GraphAPIError(Exception):
     """Raised when Microsoft Graph itself returns a non-2xx response —
@@ -44,11 +77,12 @@ class GraphService:
             user_oid = self.graph_token.split("::", 1)[-1]
             return search_demo_documents(user_oid, query, size)
 
+        kql_query = _build_kql_query(query)
         body = {
             "requests": [
                 {
                     "entityTypes": ["driveItem"],
-                    "query": {"queryString": query},
+                    "query": {"queryString": kql_query},
                     "from": 0,
                     "size": size,
                     "fields": [
@@ -66,7 +100,7 @@ class GraphService:
             "Authorization": f"Bearer {self.graph_token}",
             "Content-Type": "application/json",
         }
-        logger.info("Graph search request: query=%r size=%d", query, size)
+        logger.info("Graph search request: original=%r kql=%r size=%d", query, kql_query, size)
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(GRAPH_SEARCH_URL, json=body, headers=headers)
