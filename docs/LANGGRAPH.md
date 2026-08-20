@@ -50,9 +50,19 @@ try again before giving up.
 
 Implemented with `langgraph.graph.StateGraph` over a typed `RAGState`
 (`question`, `user`, `search_query`, `needs_retrieval`, `documents`,
-`is_relevant`, `retrieval_attempts`, `answer`, `citations`).
-`add_conditional_edges` drives both the classify/skip branch and the
-relevant/rewrite branch shown above.
+`is_relevant`, `retrieval_attempts`, `previous_queries`, `answer`,
+`citations`). `add_conditional_edges` drives both the classify/skip
+branch and the relevant/rewrite branch shown above.
+
+`previous_queries` accumulates every search query already tried this
+request (`_search` appends to it on each attempt) and is fed into
+`_llm_rewrite_query`'s prompt in full, not just the most recent query —
+so each retry is told everything that's already failed and asked for
+something *meaningfully different*, rather than rewriting blind and
+risking similar phrasings across attempts.
+`test_rewrite_prompt_includes_full_query_history` in
+`backend/tests/test_langgraph_pipeline.py` asserts the full history
+reaches the prompt.
 
 `classify_intent` exists because Graph's Search API returns *some*
 document for almost any query string, by design (its relevance ranking
@@ -83,7 +93,7 @@ all.
 |---|---|
 | Query rewriting | `LangGraphRAGService._rewrite_query` / `_llm_rewrite_query` |
 | Retrieval evaluation | `LangGraphRAGService._evaluate` / `AzureOpenAIService.evaluate_relevance` — a real LLM judgment call, not a "did we get any documents back" presence check |
-| Multiple retrieval attempts | `search` ⇄ `rewrite_query` loop, capped by `MAX_RETRIES` |
+| Multiple retrieval attempts | `search` ⇄ `rewrite_query` loop, capped by `MAX_RETRIES` (8) |
 | Conditional routing | `_route_after_evaluate` and `_route_after_classify` via `add_conditional_edges` |
 | Tool-use-style judgment call | `_classify_intent` / `AzureOpenAIService.classify_needs_retrieval` — LLM decides whether to invoke the SharePoint search "tool" at all |
 | Conversation state | `RAGState` passed through every node |

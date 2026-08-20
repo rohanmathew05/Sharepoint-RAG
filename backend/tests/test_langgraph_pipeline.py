@@ -146,7 +146,7 @@ async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
     async def fake_generate_answer(question, context):
         return "Based on the documents: Model P-450."
 
-    async def fake_rewrite(original_question, previous_query):
+    async def fake_rewrite(original_question, previous_queries):
         return "pump specifications"
 
     async def fake_evaluate_relevance(question, context):
@@ -200,7 +200,7 @@ async def test_llm_relevance_check_triggers_retry_on_unhelpful_snippet(monkeypat
     async def fake_generate_answer(question, context):
         return "The GIS ID reference is WFV0002188."
 
-    async def fake_rewrite(original_question, previous_query):
+    async def fake_rewrite(original_question, previous_queries):
         return "GIS ID reference Tullylost"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -231,8 +231,8 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
     async def fake_generate_answer(question, context):
         return "no relevant documents found"
 
-    async def fake_rewrite(original_question, previous_query):
-        return f"{previous_query} broader"
+    async def fake_rewrite(original_question, previous_queries):
+        return f"{previous_queries[-1]} broader"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
@@ -245,6 +245,35 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
 
     assert len(search_calls) == MAX_RETRIES
     assert response.citations == []
+    # Each retry actually used a different query, not the same one
+    # repeated MAX_RETRIES times.
+    assert len(set(search_calls)) == MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_rewrite_prompt_includes_full_query_history(monkeypatch):
+    """_llm_rewrite_query should tell the LLM everything already tried,
+    not just the most recent query, so retries don't circle back to
+    similar phrasings."""
+    service = LangGraphRAGService()
+    captured_prompt = {}
+
+    async def fake_generate_answer(question, context):
+        captured_prompt["question"] = question
+        return "a genuinely new query"
+
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    result = await service._llm_rewrite_query(
+        "what is the GIS ID for tullylost prv",
+        ["tullylost prv", "GIS ID tullylost", "facility reference tullylost"],
+    )
+
+    assert result == "a genuinely new query"
+    prompt = captured_prompt["question"]
+    assert "tullylost prv" in prompt
+    assert "GIS ID tullylost" in prompt
+    assert "facility reference tullylost" in prompt
 
 
 @pytest.mark.asyncio

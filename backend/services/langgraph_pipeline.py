@@ -1,10 +1,13 @@
 """LangGraph-based multi-step RAG orchestration (V2).
 
 Adds query rewriting and retrieval evaluation on top of the V1 single-shot
-RAGService: if the first SharePoint search comes back empty or too thin,
-the graph rewrites the query and searches again (bounded by max_retries)
-before falling back to generation, instead of immediately telling the
-user nothing was found.
+RAGService: if a SharePoint search comes back empty or the LLM judges the
+result irrelevant, the graph rewrites the query and searches again — up
+to MAX_RETRIES times — before falling back to generation, instead of
+immediately telling the user nothing was found. Every query already
+tried is carried in state (`previous_queries`) and fed back into the
+rewrite prompt, so each retry is a genuinely different attempt rather
+than repeating similar phrasings blind.
 
     question
        │
@@ -52,7 +55,15 @@ from backend.models.documents import Citation, SourceDocument
 from backend.services.azure_openai import AzureOpenAIService
 from backend.services.sharepoint import SharePointService
 
-MAX_RETRIES = 2
+MAX_RETRIES = 8
+
+# LangGraph's own step-recursion guard (default 25) counts every node
+# transition, not just search attempts: analyze_query + classify_intent
+# + generate_answer, plus a search/evaluate/rewrite_query cycle (3 steps)
+# per retry after the first. With MAX_RETRIES=8 the worst case exceeds
+# the default comfortably, so this is sized to the actual retry budget
+# instead of silently hitting LangGraph's unrelated limit first.
+_RECURSION_LIMIT = MAX_RETRIES * 3 + 10
 
 logger = logging.getLogger("backend.services.langgraph_pipeline")
 
@@ -95,6 +106,11 @@ class RAGState(TypedDict):
     prompt_context: str
     retrieval_attempts: int
     max_retries: int
+    # Every search query already tried this request, in order. Fed back
+    # into the rewrite prompt so each retry is told what already failed
+    # instead of guessing blind — without this, a rewrite has no memory
+    # and can end up circling similar phrasings across attempts.
+    previous_queries: list[str]
     answer: str
     citations: list[Citation]
 
@@ -181,6 +197,7 @@ class LangGraphRAGService:
         return {
             "documents": documents,
             "retrieval_attempts": state["retrieval_attempts"] + 1,
+            "previous_queries": state["previous_queries"] + [state["search_query"]],
         }
 
     async def _evaluate(self, state: RAGState) -> dict:
@@ -208,7 +225,7 @@ class LangGraphRAGService:
         return "rewrite"
 
     async def _rewrite_query(self, state: RAGState) -> dict:
-        rewritten = await self._llm_rewrite_query(state["question"], state["search_query"])
+        rewritten = await self._llm_rewrite_query(state["question"], state["previous_queries"])
         return {"search_query": rewritten}
 
     async def _generate_answer(self, state: RAGState) -> dict:
@@ -232,17 +249,25 @@ class LangGraphRAGService:
 
     # --- helpers -----------------------------------------------------------
 
-    async def _llm_rewrite_query(self, original_question: str, previous_query: str) -> str:
-        # Ask Azure OpenAI for a broader/alternate phrasing of the search
-        # query when the previous attempt came back empty.
+    async def _llm_rewrite_query(self, original_question: str, previous_queries: list[str]) -> str:
+        # Ask Azure OpenAI for a search query genuinely different from
+        # every attempt so far — not just the last one. Without the full
+        # history, a rewrite has no memory of what it already tried and
+        # can end up circling similar phrasings across retries instead of
+        # actually broadening coverage.
+        tried = "\n".join(f'- "{q}"' for q in previous_queries)
         prompt_context = (
-            f'The search "{previous_query}" returned no relevant SharePoint '
-            f'results for the question "{original_question}". Suggest a '
-            "broader or differently-phrased search query (respond with "
-            "just the query, no explanation)."
+            f'None of these searches found a relevant result for the '
+            f'question "{original_question}":\n{tried}\n\n'
+            "Suggest a new search query that is meaningfully different "
+            "from all of the above — try different keywords, a broader "
+            "or narrower phrasing, or a synonym for a term that may not "
+            "match the document's exact wording. Respond with just the "
+            "query, no explanation."
         )
         rewritten = await self.llm.generate_answer(question=prompt_context, context="")
-        return rewritten.strip().strip('"') or previous_query
+        rewritten = rewritten.strip().strip('"')
+        return rewritten or previous_queries[-1]
 
     def _build_context(self, documents: list[SourceDocument]) -> str:
         parts = []
@@ -268,10 +293,13 @@ class LangGraphRAGService:
             "prompt_context": "",
             "retrieval_attempts": 0,
             "max_retries": MAX_RETRIES,
+            "previous_queries": [],
             "answer": "",
             "citations": [],
         }
-        final_state = await self.graph.ainvoke(initial_state)
+        final_state = await self.graph.ainvoke(
+            initial_state, config={"recursion_limit": _RECURSION_LIMIT}
+        )
         return ChatResponse(
             answer=final_state["answer"],
             citations=final_state["citations"],
