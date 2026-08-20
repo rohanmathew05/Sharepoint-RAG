@@ -149,9 +149,13 @@ async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
     async def fake_rewrite(original_question, previous_query):
         return "pump specifications"
 
+    async def fake_evaluate_relevance(question, context):
+        return bool(context.strip())
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
     monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
 
     response = await service.answer_question(USER_A, "what's the pump spec sheet say")
@@ -160,6 +164,56 @@ async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
     assert response.retrieval_attempts == 2
     assert len(response.citations) == 1
     assert response.citations[0].document_name == "Pump Specifications.pdf"
+
+
+@pytest.mark.asyncio
+async def test_llm_relevance_check_triggers_retry_on_unhelpful_snippet(monkeypatch):
+    """The exact scenario an len(documents) > 0 presence check misses:
+    search finds the right document, but the snippet doesn't actually
+    contain the specific fact asked for. A real LLM relevance judgment
+    (not just "did we get any documents back") is what catches this."""
+    service = LangGraphRAGService()
+    search_calls: list[str] = []
+
+    from backend.models.documents import SourceDocument
+
+    unhelpful_doc = SourceDocument(
+        document_id="doc-1",
+        document_name="WFV0002188 TULLYLOST PRV.xlsx",
+        web_url="https://contoso.sharepoint.com/tullylost-prv.xlsx",
+        relevant_content="Site Name TULLYLOST PRV, Road Reference L7002, confined space: yes.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        return [unhelpful_doc]  # same doc found both times
+
+    # First call: snippet doesn't mention the GIS ID -> NOT_RELEVANT.
+    # Second call (after rewrite): pretend the rewritten query surfaced
+    # a snippet that does -> RELEVANT.
+    async def fake_evaluate_relevance(question, context):
+        return len(search_calls) > 1
+
+    async def fake_generate_answer(question, context):
+        return "The GIS ID reference is WFV0002188."
+
+    async def fake_rewrite(original_question, previous_query):
+        return "GIS ID reference Tullylost"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+
+    response = await service.answer_question(USER_A, "what is the GIS ID reference for tullylost prv?")
+
+    assert len(search_calls) == 2  # retried despite finding a document on attempt 1
+    assert response.retrieval_attempts == 2
+    assert "WFV0002188" in response.answer
 
 
 @pytest.mark.asyncio

@@ -82,11 +82,26 @@ all.
 | Capability | Implementation |
 |---|---|
 | Query rewriting | `LangGraphRAGService._rewrite_query` / `_llm_rewrite_query` |
-| Retrieval evaluation | `LangGraphRAGService._evaluate` |
+| Retrieval evaluation | `LangGraphRAGService._evaluate` / `AzureOpenAIService.evaluate_relevance` — a real LLM judgment call, not a "did we get any documents back" presence check |
 | Multiple retrieval attempts | `search` ⇄ `rewrite_query` loop, capped by `MAX_RETRIES` |
 | Conditional routing | `_route_after_evaluate` and `_route_after_classify` via `add_conditional_edges` |
 | Tool-use-style judgment call | `_classify_intent` / `AzureOpenAIService.classify_needs_retrieval` — LLM decides whether to invoke the SharePoint search "tool" at all |
 | Conversation state | `RAGState` passed through every node |
+
+`_evaluate` used to be `len(documents) > 0` — did the search find *anything*.
+That misses a real failure mode: Graph can find exactly the right
+document and still hand back a search snippet that doesn't contain the
+specific fact asked for (e.g. a spreadsheet's "GIS ID" field, when the
+snippet centers on a different field of the same sheet). A presence
+check calls that "relevant" and generates a confident "not found"
+answer from context that was never going to answer the question. Now
+`_evaluate` builds the same context `_generate_answer` will use and
+asks `AzureOpenAIService.evaluate_relevance` (also `max_tokens=10`,
+`temperature=0`) whether it actually answers the question — not just
+whether it's on-topic. A NOT_RELEVANT verdict routes back into
+`rewrite_query` exactly like an empty search would.
+`test_llm_relevance_check_triggers_retry_on_unhelpful_snippet` in
+`backend/tests/test_langgraph_pipeline.py` covers this directly.
 
 Follow-up question handling and tool calling are natural next steps on
 this same graph (e.g. a `conversation_history`-aware `analyze_query`

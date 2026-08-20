@@ -24,6 +24,16 @@ INTENT_CLASSIFIER_SYSTEM_PROMPT = (
     "with exactly one word: SEARCH or CHITCHAT."
 )
 
+RELEVANCE_EVALUATOR_SYSTEM_PROMPT = (
+    "You judge whether the provided SharePoint document excerpts contain "
+    "enough information to actually answer the user's question — not "
+    "just whether they're on the same general topic. If the excerpts "
+    "would let someone give a real, specific answer, respond RELEVANT. "
+    "If they're empty, off-topic, or only tangentially related and "
+    "missing the specific information asked for, respond NOT_RELEVANT. "
+    "Respond with exactly one word."
+)
+
 
 class AzureOpenAIService:
     def __init__(self):
@@ -76,6 +86,39 @@ class AzureOpenAIService:
         )
         verdict = (response.choices[0].message.content or "").strip().upper()
         return "CHITCHAT" not in verdict
+
+    async def evaluate_relevance(self, question: str, context: str) -> bool:
+        """Does the retrieved context actually contain enough to answer
+        the question — not just "did search return something"? A search
+        can find the right document and still hand back a snippet that
+        misses the specific fact asked for (e.g. it centers on a
+        different field of the same spreadsheet); a presence check alone
+        can't tell the difference, but a judgment call can.
+
+        Capped at a small token budget for the same reason as
+        classify_needs_retrieval — the whole response should be one word.
+        Defaults to True (relevant) on an ambiguous/unparseable verdict
+        or if the call itself fails, so a flaky evaluator call doesn't
+        force a pointless extra retry loop.
+        """
+        if not context.strip():
+            return False  # nothing to judge — skip the call entirely
+
+        client = self._get_client()
+        response = await client.chat.completions.create(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": RELEVANCE_EVALUATOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Question: {question}\n\nExcerpts:\n{context}",
+                },
+            ],
+            max_tokens=10,
+            temperature=0,
+        )
+        verdict = (response.choices[0].message.content or "").strip().upper()
+        return "NOT_RELEVANT" not in verdict
 
     async def embed(self, text: str) -> list[float]:
         client = self._get_client()

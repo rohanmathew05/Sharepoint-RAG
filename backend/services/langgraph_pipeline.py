@@ -92,6 +92,7 @@ class RAGState(TypedDict):
     needs_retrieval: bool
     documents: list[SourceDocument]
     is_relevant: bool
+    prompt_context: str
     retrieval_attempts: int
     max_retries: int
     answer: str
@@ -183,11 +184,21 @@ class LangGraphRAGService:
         }
 
     async def _evaluate(self, state: RAGState) -> dict:
-        # A minimal relevance check: did the search return anything at
-        # all? A production system could score each document's snippet
-        # against the question (e.g. with an LLM judge or embedding
-        # similarity) instead of this presence check.
-        return {"is_relevant": len(state["documents"]) > 0}
+        # A presence check ("did search return anything at all") can't
+        # tell the difference between "found nothing" and "found the
+        # right document, but the snippet doesn't actually contain the
+        # specific fact asked for" — a real LLM judgment call can. This
+        # is what lets a bad-snippet case retry with a rewritten query
+        # instead of confidently generating an unhelpful "not found"
+        # answer from context that was never going to answer the
+        # question.
+        context = self._build_context(state["documents"])
+        try:
+            is_relevant = await self.llm.evaluate_relevance(state["question"], context)
+        except Exception:
+            logger.warning("Relevance evaluation failed; defaulting to relevant", exc_info=True)
+            is_relevant = len(state["documents"]) > 0
+        return {"is_relevant": is_relevant, "prompt_context": context}
 
     def _route_after_evaluate(self, state: RAGState) -> str:
         if state["is_relevant"]:
@@ -202,7 +213,10 @@ class LangGraphRAGService:
 
     async def _generate_answer(self, state: RAGState) -> dict:
         documents = state["documents"]
-        context = self._build_context(documents)
+        # Reuse the context _evaluate already built for this same
+        # documents list rather than rebuilding it — evaluate always
+        # runs immediately before generate_answer on every path.
+        context = state["prompt_context"]
         answer = await self.llm.generate_answer(question=state["question"], context=context)
         citations = [
             Citation(
@@ -251,6 +265,7 @@ class LangGraphRAGService:
             "needs_retrieval": True,
             "documents": [],
             "is_relevant": False,
+            "prompt_context": "",
             "retrieval_attempts": 0,
             "max_retries": MAX_RETRIES,
             "answer": "",
