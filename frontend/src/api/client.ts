@@ -2,7 +2,19 @@ import type { ChatMessage, ChatResponse } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  errorCode?: string;
+  constructor(message: string, errorCode?: string) {
+    super(message);
+    this.errorCode = errorCode;
+  }
+}
+
+// Matches backend/main.py's obo_token_expired_handler — a terminal 401
+// the backend raises when the user's session is genuinely gone (not
+// something a silent token refresh can fix), as opposed to a plain
+// network/validation error.
+export class SessionExpiredError extends ApiError {}
 
 async function authHeaders(getToken: () => Promise<string>, demoUserId?: string) {
   const headers: Record<string, string> = {
@@ -47,7 +59,11 @@ export async function sendChatMessage(
 
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(errorBody.detail ?? `Request failed with ${res.status}`);
+    const message = errorBody.detail ?? `Request failed with ${res.status}`;
+    if (errorBody.error_code === "obo_token_expired") {
+      throw new SessionExpiredError(message, errorBody.error_code);
+    }
+    throw new ApiError(message, errorBody.error_code);
   }
 
   return res.json();

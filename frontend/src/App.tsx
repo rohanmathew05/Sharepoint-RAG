@@ -31,6 +31,7 @@ function DemoApp() {
 
 function AuthenticatedApp() {
   const { instance, accounts } = useMsal();
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   async function getToken(): Promise<string> {
     const account = accounts[0];
@@ -61,8 +62,22 @@ function AuthenticatedApp() {
         </div>
       </header>
       <main className="app-main">
-        <ChatWindow getToken={getToken} />
+        <ChatWindow getToken={getToken} onSessionExpired={() => setSessionExpired(true)} />
       </main>
+      {sessionExpired && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>Session expired</h2>
+            <p>Your session has ended. Please sign in again to keep chatting.</p>
+            <button
+              className="login-btn"
+              onClick={() => instance.loginRedirect({ ...loginRequest, account: accounts[0] })}
+            >
+              Sign in with Microsoft
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,15 +1,21 @@
 import { FormEvent, useState } from "react";
 import type { ChatMessage } from "../types";
-import { ApiError, sendChatMessage } from "../api/client";
+import { ApiError, SessionExpiredError, sendChatMessage } from "../api/client";
 import { MessageBubble } from "./MessageBubble";
 import { LoadingIndicator } from "./LoadingIndicator";
 
 export function ChatWindow({
   getToken,
   demoUserId,
+  onSessionExpired,
 }: {
   getToken: () => Promise<string>;
   demoUserId?: string;
+  // Called instead of rendering an error bubble when the backend reports
+  // the session is genuinely gone (not something a silent retry can
+  // fix) — lets the parent show a proper "sign in again" prompt instead
+  // of burying it in the conversation.
+  onSessionExpired?: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -33,6 +39,13 @@ export function ChatWindow({
         { role: "assistant", content: response.answer, citations: response.citations },
       ]);
     } catch (err) {
+      if (err instanceof SessionExpiredError && onSessionExpired) {
+        onSessionExpired();
+        // Drop the pending user message rather than leaving it sitting
+        // in history unanswered — it never actually reached the model.
+        setMessages(messages);
+        return;
+      }
       const detail = err instanceof ApiError ? err.message : "Something went wrong. Please try again.";
       setMessages([
         ...nextMessages,
