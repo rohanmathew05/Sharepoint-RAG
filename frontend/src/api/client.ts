@@ -24,19 +24,30 @@ export async function sendChatMessage(
   getToken: () => Promise<string>,
   demoUserId?: string
 ): Promise<ChatResponse> {
-  const headers = await authHeaders(getToken, demoUserId);
-  const res = await fetch(`${API_BASE}/chat`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      question,
-      conversation_history: history.map((m) => ({ role: m.role, content: m.content })),
-    }),
+  const body = JSON.stringify({
+    question,
+    conversation_history: history.map((m) => ({ role: m.role, content: m.content })),
   });
 
+  const attempt = async () => {
+    const headers = await authHeaders(getToken, demoUserId);
+    return fetch(`${API_BASE}/chat`, { method: "POST", headers, body });
+  };
+
+  let res = await attempt();
+
+  // A 401 mid-session means the backend's cached On-Behalf-Of Graph token
+  // (or the frontend's own access token) has expired. getToken() forces
+  // MSAL to silently re-acquire a fresh token (or redirect to sign-in if
+  // that's no longer possible — see App.tsx) — retry exactly once with
+  // whatever it returns rather than surfacing a confusing error.
+  if (res.status === 401 && !demoUserId) {
+    res = await attempt();
+  }
+
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(body.detail ?? `Request failed with ${res.status}`);
+    const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(errorBody.detail ?? `Request failed with ${res.status}`);
   }
 
   return res.json();
