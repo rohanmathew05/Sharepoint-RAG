@@ -55,7 +55,12 @@ function AuthenticatedApp() {
       <header className="app-header">
         <h1>AI Assistant</h1>
         <div className="header-right">
-          <span className="user-name">{accounts[0]?.name}</span>
+          <span className="user-name">
+            {accounts[0]?.name}
+            {accounts[0]?.username && (
+              <span className="user-email"> ({accounts[0].username})</span>
+            )}
+          </span>
           <button className="signout-btn" onClick={() => instance.logoutRedirect()}>
             Sign out
           </button>
