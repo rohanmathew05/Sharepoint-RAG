@@ -15,6 +15,7 @@ import jwt
 
 from backend.core.config import get_settings
 from backend.models.documents import DriveInfo, SiteInfo, SourceDocument
+from backend.services.url_utils import as_browser_viewable_url
 
 GRAPH_SEARCH_URL = "https://graph.microsoft.com/v1.0/search/query"
 
@@ -159,7 +160,7 @@ class GraphService:
                     SourceDocument(
                         document_id=resource.get("id", ""),
                         document_name=resource.get("name", "Untitled"),
-                        web_url=resource.get("webUrl", ""),
+                        web_url=as_browser_viewable_url(resource.get("webUrl", "")),
                         site=SiteInfo(
                             site_id=parent.get("siteId", ""),
                             site_name=parent.get("siteId", ""),
