@@ -106,7 +106,6 @@ class GraphService:
                     "query": {"queryString": kql_query},
                     "from": 0,
                     "size": size,
-                    "region": self.settings.GRAPH_SEARCH_REGION,
                 }
             ]
         }
@@ -114,13 +113,7 @@ class GraphService:
             "Authorization": f"Bearer {self.graph_token}",
             "Content-Type": "application/json",
         }
-        logger.info(
-            "Graph search request: original=%r kql=%r size=%d region=%r",
-            query,
-            kql_query,
-            size,
-            self.settings.GRAPH_SEARCH_REGION,
-        )
+        logger.info("Graph search request: original=%r kql=%r size=%d", query, kql_query, size)
         _log_token_scopes(self.graph_token)
 
         async with httpx.AsyncClient(timeout=15) as client:

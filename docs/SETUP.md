@@ -111,22 +111,30 @@ INFO backend.services.graph: Graph search returned 0 document(s): []
 ```
 
 `total=0` here means Graph itself found nothing for that query — not a
-bug in this app's parsing. In rough order of likelihood:
+bug in this app's parsing. Likely causes, in order:
 
-1. **Missing/mismatched `region`.** The request body includes a
-   `"region"` field (`GRAPH_SEARCH_REGION`, default `"US"`) that Graph's
-   Search API expects — Graph Explorer's built-in sample queries default
-   to `"US"` too, which is easy to miss as "just part of the sample" when
-   comparing a working Explorer call against a custom app's request that
-   omits it entirely. If search still returns nothing for content you've
-   confirmed exists (e.g. via the same query in Graph Explorer), try
-   setting `GRAPH_SEARCH_REGION` to your tenant's actual region (ISO
-   3166-1 alpha-3, e.g. `IRL`, `GBR`) instead of the `US` default.
-2. **Content not indexed by Microsoft Search yet** — can lag newly
+1. **Content not indexed by Microsoft Search yet** — can lag newly
    uploaded/permissioned SharePoint content by minutes to over a day in
    some tenants.
-3. **The signed-in user genuinely doesn't have access** to anything
+2. **The signed-in user genuinely doesn't have access** to anything
    matching (the system working as intended, not a bug).
+3. **A tenant-level restriction on which apps can call the Microsoft
+   Search API**, separate from Graph permission consent. If Graph
+   Explorer finds content with the identical query/body that this app's
+   own request doesn't (same signed-in user, `Sites.Read.All` confirmed
+   present via the scope log line below), that's the strongest signal —
+   Graph Explorer is a Microsoft first-party app and may be allowed
+   through a gate a custom app registration isn't. Check the Microsoft
+   365 admin center for a Search API application allowlist (naming and
+   location vary by tenant rollout — search the admin center itself for
+   "search permissions" or "Microsoft Search API").
+
+Do NOT add a `"region"` field to the request body to try to fix this —
+Graph rejects it outright for delegated-permission requests
+(`BadRequest: Region is not supported when request with delegated
+permission`); it only applies to application-only auth, which this app
+intentionally never uses (see the OBO/permission-aware design in the
+root README).
 
 The `Graph token scopes (scp claim)` log line (also emitted per request)
 tells you whether the OBO-derived token even carries `Sites.Read.All` —
