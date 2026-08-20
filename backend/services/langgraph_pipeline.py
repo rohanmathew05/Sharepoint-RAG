@@ -12,6 +12,13 @@ user nothing was found.
   analyze_query  (normalize / extract a search query)
        │
        ▼
+ classify_intent  (does this actually need a SharePoint search?)
+       │
+       ├── no (greeting/chitchat) ──▶ answer_conversationally ──▶ END
+       │
+      yes
+       │
+       ▼
     search  ◀────────────────┐  (permission-aware SharePoint search)
        │                      │
        ▼                      │
@@ -52,11 +59,36 @@ MAX_RETRIES = 2
 # this with an Azure OpenAI call (see _llm_rewrite_query below).
 _GENERIC_LEADING_WORDS = {"what", "how", "when", "where", "is", "are", "does", "the", "a"}
 
+# Greetings/chitchat that never warrant a SharePoint search — matched
+# against the whole message (after stripping punctuation/whitespace), not
+# as a substring, so a real question that happens to contain "hi" (e.g.
+# "hi-vis vest requirements") isn't misclassified.
+_CHITCHAT_MESSAGES = {
+    "hi", "hello", "hey", "hiya", "yo", "howdy",
+    "thanks", "thank you", "thx", "cheers",
+    "bye", "goodbye", "see you",
+    "good morning", "good afternoon", "good evening", "good night",
+    "how are you", "how's it going", "whats up", "what's up",
+    "ok", "okay", "sure", "cool", "nice", "great", "test",
+}
+
+_CHITCHAT_REPLY = (
+    "Hi! Ask me a question about your company's SharePoint documents — "
+    'for example, "What PPE is required for confined space work?" — and '
+    "I'll search what you have access to and cite the sources."
+)
+
+
+def _is_chitchat(question: str) -> bool:
+    normalized = question.strip().lower().strip("?.!,")
+    return normalized in _CHITCHAT_MESSAGES
+
 
 class RAGState(TypedDict):
     question: str
     user: UserContext
     search_query: str
+    needs_retrieval: bool
     documents: list[SourceDocument]
     is_relevant: bool
     retrieval_attempts: int
@@ -82,13 +114,20 @@ class LangGraphRAGService:
         graph = StateGraph(RAGState)
 
         graph.add_node("analyze_query", self._analyze_query)
+        graph.add_node("classify_intent", self._classify_intent)
+        graph.add_node("answer_conversationally", self._answer_conversationally)
         graph.add_node("search", self._search)
         graph.add_node("evaluate", self._evaluate)
         graph.add_node("rewrite_query", self._rewrite_query)
         graph.add_node("generate_answer", self._generate_answer)
 
         graph.set_entry_point("analyze_query")
-        graph.add_edge("analyze_query", "search")
+        graph.add_edge("analyze_query", "classify_intent")
+        graph.add_conditional_edges(
+            "classify_intent",
+            self._route_after_classify,
+            {"search": "search", "skip": "answer_conversationally"},
+        )
         graph.add_edge("search", "evaluate")
         graph.add_conditional_edges(
             "evaluate",
@@ -97,6 +136,7 @@ class LangGraphRAGService:
         )
         graph.add_edge("rewrite_query", "search")
         graph.add_edge("generate_answer", END)
+        graph.add_edge("answer_conversationally", END)
 
         return graph.compile()
 
@@ -104,6 +144,21 @@ class LangGraphRAGService:
 
     async def _analyze_query(self, state: RAGState) -> dict:
         return {"search_query": state["question"].strip(), "retrieval_attempts": 0}
+
+    async def _classify_intent(self, state: RAGState) -> dict:
+        # A greeting ("hi", "thanks", ...) never warrants a SharePoint
+        # search — without this, those messages were reaching Graph's
+        # search API, which (correctly, per its own relevance ranking)
+        # still returns *some* document for almost any query string,
+        # producing citations that have nothing to do with what was
+        # actually asked.
+        return {"needs_retrieval": not _is_chitchat(state["question"])}
+
+    def _route_after_classify(self, state: RAGState) -> str:
+        return "search" if state["needs_retrieval"] else "skip"
+
+    async def _answer_conversationally(self, state: RAGState) -> dict:
+        return {"answer": _CHITCHAT_REPLY, "citations": []}
 
     async def _search(self, state: RAGState) -> dict:
         documents = await self.sharepoint.search(
@@ -191,6 +246,7 @@ class LangGraphRAGService:
             "question": question,
             "user": user,
             "search_query": question,
+            "needs_retrieval": True,
             "documents": [],
             "is_relevant": False,
             "retrieval_attempts": 0,

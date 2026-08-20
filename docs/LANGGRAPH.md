@@ -25,6 +25,13 @@ try again before giving up.
    analyze_query        normalizes the question into a search query
           │
           ▼
+  classify_intent       does this actually need a SharePoint search?
+          │
+          ├── no (greeting/chitchat) ──▶ answer_conversationally ──▶ END
+          │
+         yes
+          │
+          ▼
         search   ◀───────────────┐   SharePointService.search(user, query)
           │                       │   (OBO-gated Graph call — unchanged
           ▼                       │    permission boundary from V1)
@@ -42,9 +49,21 @@ try again before giving up.
 ```
 
 Implemented with `langgraph.graph.StateGraph` over a typed `RAGState`
-(`question`, `user`, `search_query`, `documents`, `is_relevant`,
-`retrieval_attempts`, `answer`, `citations`). `add_conditional_edges`
-drives the relevant/rewrite branch shown above.
+(`question`, `user`, `search_query`, `needs_retrieval`, `documents`,
+`is_relevant`, `retrieval_attempts`, `answer`, `citations`).
+`add_conditional_edges` drives both the classify/skip branch and the
+relevant/rewrite branch shown above.
+
+`classify_intent` exists because Graph's Search API returns *some*
+document for almost any query string, by design (its relevance ranking
+doesn't require a strong match) — without this check, a message like
+"hello" reached SharePoint search and came back with citations that had
+nothing to do with what was actually asked. `_is_chitchat` matches the
+whole (normalized) message against a small greeting/chitchat set —
+never a substring match, so a real question that happens to contain a
+greeting-like word ("hi-vis vest requirements") isn't misclassified.
+Chitchat gets a canned reply with no Graph call at all — cheaper and
+faster than routing it through the LLM too.
 
 ## Where each requirement from the spec is implemented
 
