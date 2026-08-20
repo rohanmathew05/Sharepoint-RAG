@@ -1,5 +1,5 @@
 import type { Citation } from "../types";
-import { getSourceIcon } from "../utils/fileIcons";
+import { FileTypeIcon } from "./FileTypeIcon";
 
 export function SourceCard({ citation }: { citation: Citation }) {
   return (
@@ -9,7 +9,7 @@ export function SourceCard({ citation }: { citation: Citation }) {
       target="_blank"
       rel="noopener noreferrer"
     >
-      <span className="source-icon">{getSourceIcon(citation.document_name, citation.is_folder)}</span>
+      <FileTypeIcon documentName={citation.document_name} isFolder={citation.is_folder} />
       <span className="source-text">
         <span className="source-name">{citation.document_name}</span>
         {citation.folder_path && (
