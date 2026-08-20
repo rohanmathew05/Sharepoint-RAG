@@ -40,6 +40,7 @@ OBO-derived Graph token for the requesting user. Rewriting the query and
 retrying never bypasses that — it only changes what gets searched for,
 not who is allowed to see the results.
 """
+import logging
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -53,16 +54,21 @@ from backend.services.sharepoint import SharePointService
 
 MAX_RETRIES = 2
 
+logger = logging.getLogger("backend.services.langgraph_pipeline")
+
 # A tiny stand-in for "ask the LLM to rewrite the query" — broadens the
 # query by dropping the least-specific leading word so a second search
 # attempt can surface partial matches. Real deployments should replace
 # this with an Azure OpenAI call (see _llm_rewrite_query below).
 _GENERIC_LEADING_WORDS = {"what", "how", "when", "where", "is", "are", "does", "the", "a"}
 
-# Greetings/chitchat that never warrant a SharePoint search — matched
-# against the whole message (after stripping punctuation/whitespace), not
-# as a substring, so a real question that happens to contain "hi" (e.g.
-# "hi-vis vest requirements") isn't misclassified.
+# DEMO_MODE stand-in for _classify_intent's real Azure OpenAI call (see
+# AzureOpenAIService.classify_needs_retrieval) — a fixed word-list can't
+# make judgment calls the way a classifier can ("what's the deadline"
+# vs. "what's up"), but it's free and deterministic, which is what the
+# demo needs. Matched against the whole message, not as a substring, so
+# a real question that happens to contain "hi" (e.g. "hi-vis vest
+# requirements") isn't misclassified.
 _CHITCHAT_MESSAGES = {
     "hi", "hello", "hey", "hiya", "yo", "howdy",
     "thanks", "thank you", "thx", "cheers",
@@ -151,8 +157,21 @@ class LangGraphRAGService:
         # search API, which (correctly, per its own relevance ranking)
         # still returns *some* document for almost any query string,
         # producing citations that have nothing to do with what was
-        # actually asked.
-        return {"needs_retrieval": not _is_chitchat(state["question"])}
+        # actually asked. Real deployments use an actual (cheap, capped)
+        # LLM call for this rather than a fixed word-list, since intent
+        # is a judgment call a classifier handles better than an exact
+        # match ever could.
+        question = state["question"]
+        if self.settings.DEMO_MODE:
+            needs_retrieval = not _is_chitchat(question)
+        else:
+            try:
+                needs_retrieval = await self.llm.classify_needs_retrieval(question)
+            except Exception:
+                logger.warning("Intent classification failed; defaulting to search", exc_info=True)
+                needs_retrieval = True
+        logger.info("Intent classification: question=%r needs_retrieval=%s", question, needs_retrieval)
+        return {"needs_retrieval": needs_retrieval}
 
     def _route_after_classify(self, state: RAGState) -> str:
         return "search" if state["needs_retrieval"] else "skip"

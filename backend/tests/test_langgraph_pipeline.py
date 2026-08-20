@@ -3,6 +3,7 @@ even though it retries with a rewritten query, and that it actually
 retries when the first search comes back empty."""
 import pytest
 
+from backend.core.config import get_settings
 from backend.models.auth import UserContext
 from backend.services.langgraph_pipeline import LangGraphRAGService, _is_chitchat
 
@@ -79,3 +80,75 @@ async def test_real_question_still_searches():
     response = await service.answer_question(USER_A, "What PPE is required for confined space work?")
     assert response.retrieval_attempts >= 1
     assert len(response.citations) > 0
+
+
+@pytest.fixture
+def real_mode(monkeypatch):
+    """These tests exercise the real (non-demo) intent-classification
+    path, mocking the LLM/search calls so nothing actually reaches
+    Azure OpenAI or Microsoft Graph."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    yield settings
+
+
+@pytest.mark.asyncio
+async def test_real_mode_llm_says_chitchat_skips_search(monkeypatch, real_mode):
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return False  # LLM verdict: CHITCHAT
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("search should not be reached when LLM says chitchat")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fail_if_called)
+
+    response = await service.answer_question(USER_A, "anything at all")
+    assert response.citations == []
+    assert response.retrieval_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_real_mode_llm_says_search_triggers_retrieval(monkeypatch, real_mode):
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return True  # LLM verdict: SEARCH
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    response = await service.answer_question(USER_A, "what are the coordinates")
+    assert response.retrieval_attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_real_mode_classification_failure_defaults_to_search(monkeypatch, real_mode):
+    service = LangGraphRAGService()
+
+    async def broken_classify(question: str) -> bool:
+        raise RuntimeError("Azure OpenAI had a bad day")
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    # Should not raise, and should still have attempted a search rather
+    # than silently skipping it.
+    response = await service.answer_question(USER_A, "what are the coordinates")
+    assert response.retrieval_attempts >= 1

@@ -58,12 +58,25 @@ relevant/rewrite branch shown above.
 document for almost any query string, by design (its relevance ranking
 doesn't require a strong match) — without this check, a message like
 "hello" reached SharePoint search and came back with citations that had
-nothing to do with what was actually asked. `_is_chitchat` matches the
-whole (normalized) message against a small greeting/chitchat set —
-never a substring match, so a real question that happens to contain a
-greeting-like word ("hi-vis vest requirements") isn't misclassified.
-Chitchat gets a canned reply with no Graph call at all — cheaper and
-faster than routing it through the LLM too.
+nothing to do with what was actually asked.
+
+In a real deployment, the classification itself is a genuine (tiny) LLM
+call — `AzureOpenAIService.classify_needs_retrieval`, capped at
+`max_tokens=10` and `temperature=0` since the entire response is meant
+to be one word (`SEARCH` or `CHITCHAT`). Intent is a judgment call a
+classifier handles better than a fixed word-list ever could ("what's
+the deadline" vs. "what's up"), and at ~10 output tokens it costs a
+small fraction of an actual generation call. If that call fails for any
+reason, `_classify_intent` logs a warning and defaults to `SEARCH` — an
+unnecessary search is a much smaller failure than silently refusing to
+look something up.
+
+`DEMO_MODE` never calls a live API for this (same as query rewriting —
+see `_llm_rewrite_query`), so it falls back to `_is_chitchat`: an exact
+match against a small greeting/chitchat set, never a substring match,
+so a real question that happens to contain a greeting-like word
+("hi-vis vest requirements") isn't misclassified. Either path routes
+chitchat to a canned reply with no Graph call at all.
 
 ## Where each requirement from the spec is implemented
 
@@ -72,7 +85,8 @@ faster than routing it through the LLM too.
 | Query rewriting | `LangGraphRAGService._rewrite_query` / `_llm_rewrite_query` |
 | Retrieval evaluation | `LangGraphRAGService._evaluate` |
 | Multiple retrieval attempts | `search` ⇄ `rewrite_query` loop, capped by `MAX_RETRIES` |
-| Conditional routing | `_route_after_evaluate` via `add_conditional_edges` |
+| Conditional routing | `_route_after_evaluate` and `_route_after_classify` via `add_conditional_edges` |
+| Tool-use-style judgment call | `_classify_intent` / `AzureOpenAIService.classify_needs_retrieval` — LLM decides whether to invoke the SharePoint search "tool" at all |
 | Conversation state | `RAGState` passed through every node |
 
 Follow-up question handling and tool calling are natural next steps on

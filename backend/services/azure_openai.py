@@ -17,6 +17,13 @@ SYSTEM_PROMPT = (
     "if you believe they exist."
 )
 
+INTENT_CLASSIFIER_SYSTEM_PROMPT = (
+    "You decide whether a user's message requires searching internal "
+    "company SharePoint documents to answer, or whether it's a greeting, "
+    "thanks, or other chitchat that needs no document search. Respond "
+    "with exactly one word: SEARCH or CHITCHAT."
+)
+
 
 class AzureOpenAIService:
     def __init__(self):
@@ -49,6 +56,29 @@ class AzureOpenAIService:
             temperature=0.2,
         )
         return response.choices[0].message.content or ""
+
+    async def classify_needs_retrieval(self, question: str) -> bool:
+        """Cheap intent check: does this message need a SharePoint search,
+        or is it chitchat? Capped at a small token budget since the whole
+        response should be one word — this is meant to cost near-nothing
+        compared to an actual generation call.
+
+        Defaults to True (search) on an ambiguous or unparseable verdict —
+        an unnecessary search is a much smaller failure than silently
+        refusing to look something up because a classifier had a weird day.
+        """
+        client = self._get_client()
+        response = await client.chat.completions.create(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            max_tokens=10,
+            temperature=0,
+        )
+        verdict = (response.choices[0].message.content or "").strip().upper()
+        return "CHITCHAT" not in verdict
 
     async def embed(self, text: str) -> list[float]:
         if self.settings.DEMO_MODE:
