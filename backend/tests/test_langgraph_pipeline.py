@@ -313,6 +313,63 @@ async def test_exhausted_retries_use_llm_generated_clarification(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_exhausted_retries_fall_back_to_best_attempt_content(monkeypatch):
+    """Reproduces the real failure this fixes: an early attempt finds the
+    right document but gets marked not-relevant, a later rewrite finds
+    nothing at all, and retries run out. The pipeline should still try to
+    answer from the best (richest) content ever found rather than
+    discarding it and asking the user for more detail as if nothing had
+    ever turned up."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    good_doc = SourceDocument(
+        document_id="doc-1",
+        document_name="NEILLSTOWN COMMUNITY CENTRE.xlsx",
+        web_url="https://contoso.sharepoint.com/neillstown.xlsx",
+        relevant_content="Site Name NEILLSTOWN COMMUNITY CENTRE, GIS ID NC-4471.",
+    )
+
+    search_calls: list[str] = []
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        if len(search_calls) == 1:
+            return [good_doc]  # found the right thing...
+        return []  # ...but every later rewrite finds nothing
+
+    async def fake_evaluate_relevance(question, context):
+        return False  # ...and gets marked not-relevant every time
+
+    async def fake_rewrite(original_question, previous_queries):
+        return f"{previous_queries[-1]} broader"
+
+    async def fake_generate_answer(question, context):
+        assert "NC-4471" in context  # must be answering from the best-found context
+        return "The GIS ID is NC-4471."
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("should try the best-found content, not ask for clarification")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fail_if_called)
+
+    response = await service.answer_question(USER_A, "what is the GIS ID for neillstown community centre")
+
+    assert response.answer == "The GIS ID is NC-4471."
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "NEILLSTOWN COMMUNITY CENTRE.xlsx"
+
+
+@pytest.mark.asyncio
 async def test_chitchat_reply_is_llm_generated(monkeypatch):
     """The greeting/chitchat response should come from a genuine LLM
     call, not a hardcoded canned string, so it actually reflects what

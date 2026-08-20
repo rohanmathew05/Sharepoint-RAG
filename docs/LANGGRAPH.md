@@ -50,9 +50,10 @@ try again before giving up.
 
 Implemented with `langgraph.graph.StateGraph` over a typed `RAGState`
 (`question`, `user`, `search_query`, `needs_retrieval`, `documents`,
-`is_relevant`, `retrieval_attempts`, `previous_queries`, `answer`,
-`citations`). `add_conditional_edges` drives both the classify/skip
-branch and the relevant/rewrite branch shown above.
+`is_relevant`, `retrieval_attempts`, `previous_queries`,
+`best_documents`, `best_context`, `answer`, `citations`).
+`add_conditional_edges` drives both the classify/skip branch and the
+relevant/rewrite branch shown above.
 
 `previous_queries` accumulates every search query already tried this
 request (`_search` appends to it on each attempt) and is fed into
@@ -124,24 +125,50 @@ substring-match. A `is_relevant=False` verdict routes back into
 
 ### What happens when every retry is exhausted
 
-If `retrieval_attempts` hits `MAX_RETRIES` without ever finding relevant
-content, `_route_after_evaluate` still routes to `generate_answer` — but
-`_generate_answer` checks `state["is_relevant"]` first. When it's still
-`False` at that point, it doesn't run the normal grounded
-`generate_answer` call (which, given only unhelpful/empty context,
-tends to produce a stilted "the provided excerpts do not contain..."
-style answer that reads like a broken error message rather than a
-useful response). Instead it calls
-`AzureOpenAIService.generate_clarification(question, previous_queries)`
-— a genuine LLM call, not a hardcoded string — which is told the
-question and every search query already tried, and asked to explain
-in natural language that nothing was found and suggest what specific
-detail (an exact document name, a reference number, a different term)
-would help. No citations are returned on this path, since no document
-was ever confirmed relevant. If the call itself fails, a fixed fallback
-string (`_FALLBACK_CLARIFICATION_REPLY`) is used instead of leaving the
-user with nothing. `test_exhausted_retries_use_llm_generated_clarification`
-in `backend/tests/test_langgraph_pipeline.py` covers this path.
+If `retrieval_attempts` hits `MAX_RETRIES` without the *last* attempt
+being judged relevant, `_route_after_evaluate` still routes to
+`generate_answer` — but `_generate_answer` checks `state["is_relevant"]`
+first.
+
+Before deciding what to do, it's important that "the last attempt wasn't
+relevant" is not the same as "nothing useful was ever found" — an
+earlier attempt can find exactly the right document and still get
+marked `is_relevant=False` (a plausible false negative, e.g. Neillstown
+Community Centre files for a Neillstown Community Centre question), and
+a later rewrite can then find nothing at all. If `_generate_answer` only
+ever looked at the *most recent* attempt, that earlier find would be
+silently discarded and the user would get a "couldn't find anything"
+clarification even though a strong candidate document was sitting right
+there a few attempts ago. `_evaluate` guards against this by tracking
+`best_documents`/`best_context` on `RAGState` — the richest non-empty
+`(documents, context)` pair seen across *any* attempt, not just the
+latest — updated whenever a new attempt's context is longer than the
+best one seen so far.
+
+So `_generate_answer` branches three ways:
+- `is_relevant=True` → normal grounded answer over the last attempt's
+  `documents`/`prompt_context`, as before.
+- `is_relevant=False` but `best_context` is non-empty → retries are
+  exhausted, but something was found along the way. Give the grounded
+  `generate_answer` call a real shot at `best_documents`/`best_context`
+  and cite those documents — a wrong relevance verdict is a more
+  forgivable failure than throwing away a real find.
+- `is_relevant=False` and `best_context` is still empty → truly nothing
+  was ever found. Calls
+  `AzureOpenAIService.generate_clarification(question, previous_queries)`
+  — a genuine LLM call, not a hardcoded string — which is told the
+  question and every search query already tried, and asked to explain
+  in natural language that nothing was found and suggest what specific
+  detail (an exact document name, a reference number, a different term)
+  would help. No citations are returned on this path. If the call
+  itself fails, a fixed fallback string (`_FALLBACK_CLARIFICATION_REPLY`)
+  is used instead of leaving the user with nothing.
+
+`test_exhausted_retries_use_llm_generated_clarification` covers the
+truly-nothing-found path, and
+`test_exhausted_retries_fall_back_to_best_attempt_content` covers the
+"earlier attempt found something, later one didn't" recovery path — both
+in `backend/tests/test_langgraph_pipeline.py`.
 
 Follow-up question handling and tool calling are natural next steps on
 this same graph (e.g. a `conversation_history`-aware `analyze_query`

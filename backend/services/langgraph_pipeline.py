@@ -118,6 +118,16 @@ class RAGState(TypedDict):
     # instead of guessing blind — without this, a rewrite has no memory
     # and can end up circling similar phrasings across attempts.
     previous_queries: list[str]
+    # The richest non-empty (documents, context) pair seen across every
+    # attempt, tracked separately from `documents`/`prompt_context` (which
+    # only ever hold the *most recent* attempt). Without this, an attempt
+    # that finds the right document but gets marked not-relevant, followed
+    # by a rewritten query that finds nothing, silently loses that earlier
+    # find — generate_answer would see only the empty final attempt and
+    # fall straight to a "couldn't find anything" clarification even
+    # though something plausible was found along the way.
+    best_documents: list[SourceDocument]
+    best_context: str
     answer: str
     citations: list[Citation]
 
@@ -247,7 +257,19 @@ class LangGraphRAGService:
             is_relevant,
             len(context),
         )
-        return {"is_relevant": is_relevant, "prompt_context": context}
+        result: dict = {"is_relevant": is_relevant, "prompt_context": context}
+
+        # Keep the richest context ever found, not just the latest — a
+        # later rewrite that finds nothing shouldn't erase an earlier
+        # attempt that actually found something. This is also a hedge
+        # against a false-negative relevance verdict: the "not relevant"
+        # judgment might be wrong, and if every later attempt comes back
+        # empty, this is the best material generate_answer will ever get.
+        if len(context) > len(state.get("best_context", "")):
+            result["best_documents"] = state["documents"]
+            result["best_context"] = context
+
+        return result
 
     def _route_after_evaluate(self, state: RAGState) -> str:
         if state["is_relevant"]:
@@ -271,15 +293,16 @@ class LangGraphRAGService:
         return {"search_query": rewritten}
 
     async def _generate_answer(self, state: RAGState) -> dict:
-        # Arriving here with is_relevant=False means every retry was
-        # exhausted without finding anything that actually answers the
-        # question — a normal grounded generate_answer call in that case
-        # produces the "the provided excerpts do not contain..." style
-        # answer, which reads like a broken error message rather than a
-        # helpful response. Ask the LLM for a natural clarification
-        # instead, and don't cite documents that were never confirmed
-        # relevant.
-        if not state["is_relevant"]:
+        # Arriving here with is_relevant=False means the *last* attempt
+        # wasn't judged relevant — but that doesn't mean nothing useful
+        # was ever found. An earlier attempt can find the right document
+        # and get marked not-relevant, and a later rewrite can then find
+        # nothing at all; without best_documents/best_context, that
+        # earlier find would be silently lost and this would always fall
+        # to a clarification even when real candidate content exists.
+        # Only when nothing was ever found (best_context still empty) do
+        # we skip straight to asking for more detail.
+        if not state["is_relevant"] and not state.get("best_context"):
             try:
                 answer = await self.llm.generate_clarification(
                     state["question"], state["previous_queries"]
@@ -294,11 +317,27 @@ class LangGraphRAGService:
             )
             return {"answer": answer, "citations": []}
 
-        documents = state["documents"]
-        # Reuse the context _evaluate already built for this same
-        # documents list rather than rebuilding it — evaluate always
-        # runs immediately before generate_answer on every path.
-        context = state["prompt_context"]
+        if not state["is_relevant"]:
+            # Retries exhausted, but an earlier attempt found something
+            # worth trying — a false-negative relevance verdict is a
+            # more forgivable failure than throwing away a real find, so
+            # give the grounded answer a real shot at it rather than
+            # jumping straight to "please clarify".
+            documents = state["best_documents"]
+            context = state["best_context"]
+            logger.info(
+                "[generate_answer] falling back to best-attempt content "
+                "(%d document(s), %d context chars) after exhausting retries",
+                len(documents),
+                len(context),
+            )
+        else:
+            documents = state["documents"]
+            # Reuse the context _evaluate already built for this same
+            # documents list rather than rebuilding it — evaluate always
+            # runs immediately before generate_answer on every path.
+            context = state["prompt_context"]
+
         answer = await self.llm.generate_answer(question=state["question"], context=context)
         citations = [
             Citation(
@@ -366,6 +405,8 @@ class LangGraphRAGService:
             "retrieval_attempts": 0,
             "max_retries": MAX_RETRIES,
             "previous_queries": [],
+            "best_documents": [],
+            "best_context": "",
             "answer": "",
             "citations": [],
         }
