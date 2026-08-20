@@ -96,6 +96,40 @@ frontend's access token as the `user_assertion`. This requires:
   listed above, with admin consent granted — OBO will fail with
   `AADSTS65001` (consent required) otherwise.
 
+### Debugging empty/unexpected search results
+
+If chat answers keep saying nothing was found, check `backend/services/graph.py`'s
+log lines in the uvicorn console — every real (non-demo) search logs the
+outgoing query, Graph's response status, and how many hits it parsed out,
+e.g.:
+
+```
+INFO backend.services.graph: Graph search request: query='confined space PPE' size=8
+INFO backend.services.graph: Graph search response: status=200
+INFO backend.services.graph: Graph search parsed: 1 hitsContainers, total=0, moreResultsAvailable=False
+INFO backend.services.graph: Graph search returned 0 document(s): []
+```
+
+`total=0` here means Graph itself found nothing for that query — not a
+bug in this app's parsing. Common causes: the content isn't indexed by
+Microsoft Search yet (can lag newly uploaded/permissioned SharePoint
+content by minutes to over a day in some tenants), or the signed-in
+user genuinely doesn't have access to anything matching.
+
+To also see the raw JSON Graph returned (useful if `total` looks wrong,
+or hits are present but not parsing into documents), run with
+`LOG_LEVEL=DEBUG`:
+
+```bash
+LOG_LEVEL=DEBUG uvicorn backend.main:app --reload --port 8000
+```
+
+(PowerShell: `$env:LOG_LEVEL="DEBUG"; uvicorn backend.main:app --reload --port 8000`)
+
+Also sanity-check `GET /api/health` — if `demo_mode` is `true`, none of
+this logging path runs at all; searches are being answered from the
+fixture library in `backend/services/demo_data.py` instead of real Graph.
+
 ### Mid-session token expiry
 
 The frontend's Entra ID access token and the backend's per-user cached
