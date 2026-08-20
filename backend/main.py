@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from backend.api import auth, chat, chat_v2, search
 from backend.auth.obo import OBOExchangeError, OBOTokenExpiredError
 from backend.core.config import get_settings
+from backend.services.graph import GraphAPIError
 
 settings = get_settings()
 
@@ -53,6 +54,18 @@ async def obo_exchange_error_handler(request: Request, exc: OBOExchangeError) ->
     return JSONResponse(
         status_code=502,
         content={"detail": str(exc), "error_code": "obo_exchange_failed"},
+    )
+
+
+@app.exception_handler(GraphAPIError)
+async def graph_api_error_handler(request: Request, exc: GraphAPIError) -> JSONResponse:
+    headers = {"Retry-After": exc.retry_after} if exc.retry_after else {}
+    status_code = 429 if exc.status_code == 429 else 502
+    error_code = "graph_rate_limited" if exc.status_code == 429 else "graph_error"
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error_code": error_code},
+        headers=headers,
     )
 
 
