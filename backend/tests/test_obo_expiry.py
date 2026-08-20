@@ -5,19 +5,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.auth import obo as obo_module
-from backend.core.config import get_settings
 from backend.main import app
 
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def real_mode(monkeypatch):
-    """These tests exercise the non-demo auth path."""
-    settings = get_settings()
-    monkeypatch.setattr(settings, "DEMO_MODE", False)
-    monkeypatch.setattr(settings, "ENTRA_TENANT_ID", "test-tenant")
-    monkeypatch.setattr(settings, "ENTRA_CLIENT_ID", "test-client")
+def clean_obo_cache():
     obo_module._obo_cache.clear()
     yield
     obo_module._obo_cache.clear()

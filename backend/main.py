@@ -83,4 +83,4 @@ async def graph_api_error_handler(request: Request, exc: GraphAPIError) -> JSONR
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "demo_mode": settings.DEMO_MODE}
+    return {"status": "ok"}

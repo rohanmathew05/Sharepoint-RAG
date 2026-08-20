@@ -23,10 +23,3 @@ export const msalConfig: Configuration = {
 export const loginRequest = {
   scopes: [`api://${import.meta.env.VITE_ENTRA_CLIENT_ID ?? ""}/access_as_user`],
 };
-
-// When true (default, and true whenever no Entra ID app registration is
-// configured), the app skips real MSAL sign-in and instead lets the user
-// pick one of two demo identities via a dropdown, matching the backend's
-// DEMO_MODE fixture users. This is what makes the permission-aware
-// retrieval demo runnable without an Azure tenant.
-export const DEMO_MODE = !import.meta.env.VITE_ENTRA_CLIENT_ID;

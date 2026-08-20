@@ -34,11 +34,6 @@ class Settings(BaseSettings):
     MAX_SEARCH_RESULTS: int = 8
     MAX_RAG_CONTEXT_CHARS: int = 12000
 
-    # When true, uses local fixture data instead of calling Microsoft Graph /
-    # Azure OpenAI. Useful for running the permission-aware demo without
-    # live Azure credentials.
-    DEMO_MODE: bool = True
-
 
 @lru_cache
 def get_settings() -> Settings:

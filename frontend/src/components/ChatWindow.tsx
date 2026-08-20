@@ -6,11 +6,9 @@ import { LoadingIndicator } from "./LoadingIndicator";
 
 export function ChatWindow({
   getToken,
-  demoUserId,
   onSessionExpired,
 }: {
   getToken: () => Promise<string>;
-  demoUserId?: string;
   // Called instead of rendering an error bubble when the backend reports
   // the session is genuinely gone (not something a silent retry can
   // fix) — lets the parent show a proper "sign in again" prompt instead
@@ -33,7 +31,7 @@ export function ChatWindow({
     setIsLoading(true);
 
     try {
-      const response = await sendChatMessage(question, nextMessages, getToken, demoUserId);
+      const response = await sendChatMessage(question, nextMessages, getToken);
       setMessages([
         ...nextMessages,
         { role: "assistant", content: response.answer, citations: response.citations },

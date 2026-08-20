@@ -1,7 +1,8 @@
-# Setup: Real Microsoft Entra ID / Graph / Azure OpenAI
+# Setup: Microsoft Entra ID / Graph / Azure OpenAI
 
-The project runs in `DEMO_MODE` by default (see root README). This guide
-covers switching to a real tenant.
+This app always talks to a real Entra ID tenant, Microsoft Graph, and
+Azure OpenAI — there's no offline/local mode. This guide covers setting
+that up end to end.
 
 ## 1. Register an Entra ID application
 
@@ -36,7 +37,6 @@ Fill in:
 ENTRA_TENANT_ID=<tenant id>
 ENTRA_CLIENT_ID=<client id>
 ENTRA_CLIENT_SECRET=<client secret>
-DEMO_MODE=false
 ```
 
 Also set the Azure OpenAI variables (see root README's env var list).
@@ -51,12 +51,11 @@ VITE_ENTRA_TENANT_ID=<tenant id>
 VITE_REDIRECT_URI=http://localhost:5173
 ```
 
-Setting `VITE_ENTRA_CLIENT_ID` automatically switches the frontend out of
-demo mode (`src/authConfig.ts::DEMO_MODE`) and into real MSAL sign-in.
-
 ## 4. Set up two test users with different SharePoint access
 
-To reproduce the permission demo against a real tenant:
+This is how you verify the permission-aware retrieval claim for real —
+not by reading the code, by actually getting different results as
+different users:
 
 1. In SharePoint, create (or reuse) two document libraries/sites, e.g.
    "Health & Safety" (shared) and "Engineering" (restricted).
@@ -69,9 +68,10 @@ To reproduce the permission demo against a real tenant:
    Engineering content — User A should get no relevant sources, User B
    should get citations back to the Engineering documents.
 
-This is the same scenario `docs/PERMISSIONS_DEMO.md` walks through in
-demo mode — the only difference is that Microsoft Graph, not the fixture
-table in `backend/services/demo_data.py`, is enforcing the boundary.
+Microsoft Graph's Search API is what enforces this boundary — there is
+no application-level ACL or filtering logic in this codebase to audit;
+`SharePointService.search()` passes the user's own delegated (OBO) token
+straight through to Graph and returns exactly what Graph returns.
 
 ## 5. Run it
 
@@ -99,9 +99,8 @@ frontend's access token as the `user_assertion`. This requires:
 ### Debugging empty/unexpected search results
 
 If chat answers keep saying nothing was found, check `backend/services/graph.py`'s
-log lines in the uvicorn console — every real (non-demo) search logs the
-outgoing query, Graph's response status, and how many hits it parsed out,
-e.g.:
+log lines in the uvicorn console — every search logs the outgoing query,
+Graph's response status, and how many hits it parsed out, e.g.:
 
 ```
 INFO backend.services.graph: Graph search request: query='confined space PPE' size=8
@@ -149,10 +148,6 @@ LOG_LEVEL=DEBUG uvicorn backend.main:app --reload --port 8000
 ```
 
 (PowerShell: `$env:LOG_LEVEL="DEBUG"; uvicorn backend.main:app --reload --port 8000`)
-
-Also sanity-check `GET /api/health` — if `demo_mode` is `true`, none of
-this logging path runs at all; searches are being answered from the
-fixture library in `backend/services/demo_data.py` instead of real Graph.
 
 ### Mid-session token expiry
 

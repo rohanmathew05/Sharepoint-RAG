@@ -2,23 +2,12 @@
 transient errors) surfaces as a typed 429/502 instead of an unhandled 500
 (previously graph.py's resp.raise_for_status() propagated unhandled)."""
 import jwt
-import pytest
 from fastapi.testclient import TestClient
 
-from backend.core.config import get_settings
 from backend.main import app
 from backend.services.graph import GraphAPIError
 
 client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def real_mode(monkeypatch):
-    settings = get_settings()
-    monkeypatch.setattr(settings, "DEMO_MODE", False)
-    monkeypatch.setattr(settings, "ENTRA_TENANT_ID", "test-tenant")
-    monkeypatch.setattr(settings, "ENTRA_CLIENT_ID", "test-client")
-    yield
 
 
 def _valid_token() -> str:

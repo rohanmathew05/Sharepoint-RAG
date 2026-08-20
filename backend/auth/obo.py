@@ -55,12 +55,6 @@ async def get_graph_token_on_behalf_of(user: UserContext) -> str:
     """
     settings = get_settings()
 
-    if settings.DEMO_MODE:
-        # No real Entra ID tenant in the demo — the "delegated token" is a
-        # stand-in that SharePointService/GraphService use purely to look
-        # up which fixture user's document set to search.
-        return f"demo-graph-token::{user.oid}"
-
     cached = _obo_cache.get(user.oid)
     if cached and cached[1] > time.time() + 30:
         return cached[0]

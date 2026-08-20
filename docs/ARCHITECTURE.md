@@ -1,6 +1,6 @@
 # Architecture
 
-## Request flow (real Azure deployment)
+## Request flow
 
 ```
 ┌──────────┐  1. sign in (MSAL)          ┌──────────────────┐
@@ -80,13 +80,10 @@ with Pydantic (`backend/models/`):
 ## Frontend
 
 - `AuthenticatedTemplate` / `UnauthenticatedTemplate` (MSAL React) gate the
-  chat UI behind Microsoft sign-in in production mode.
+  chat UI behind Microsoft sign-in.
 - The frontend never holds an Azure OpenAI key or a Graph token — it only
   ever holds its own Entra ID access token, which it sends to the FastAPI
   backend on each request. The backend performs the OBO exchange.
-- `src/components/UserSwitcher.tsx` only exists for `DEMO_MODE` (no Entra
-  ID app registration configured) and is not part of the production auth
-  path.
 
 ## Deployment target
 

@@ -75,12 +75,6 @@ class GraphService:
         self.settings = get_settings()
 
     async def search_sharepoint(self, query: str, size: int = 8) -> list[SourceDocument]:
-        if self.settings.DEMO_MODE:
-            from backend.services.demo_data import search_demo_documents
-
-            user_oid = self.graph_token.split("::", 1)[-1]
-            return search_demo_documents(user_oid, query, size)
-
         kql_query = _build_kql_query(query)
         body = {
             "requests": [
