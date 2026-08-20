@@ -365,15 +365,39 @@ class LangGraphRAGService:
         # history, a rewrite has no memory of what it already tried and
         # can end up circling similar phrasings across retries instead of
         # actually broadening coverage.
+        #
+        # Graph's Search API does exact-ish keyword matching, not fuzzy
+        # matching — a single misspelled proper noun (e.g. "Neilstown"
+        # instead of "Neillstown") is enough to return zero results for
+        # an otherwise-correct query, even though a document with that
+        # exact name exists. Left to a generic "try a synonym or broader
+        # phrasing" instruction, the LLM doesn't reliably think to check
+        # for a typo first, so the strategy below is spelled out and
+        # staged by how many attempts have already failed: check spelling
+        # first (cheapest, most likely fix for a proper noun typo), then
+        # fall back to dropping the most specific/unusual word entirely
+        # once spelling alone hasn't produced a new result.
         tried = "\n".join(f'- "{q}"' for q in previous_queries)
         prompt_context = (
             f'None of these searches found a relevant result for the '
             f'question "{original_question}":\n{tried}\n\n'
-            "Suggest a new search query that is meaningfully different "
-            "from all of the above — try different keywords, a broader "
-            "or narrower phrasing, or a synonym for a term that may not "
-            "match the document's exact wording. Respond with just the "
-            "query, no explanation."
+            "Suggest one new search query, choosing a strategy based on "
+            "what hasn't been tried yet in the list above:\n"
+            "1. First, check every word for a possible spelling mistake "
+            "or typo — especially proper nouns like place, site, or "
+            "document names — and correct it while keeping the rest of "
+            "the query the same. This is often the actual reason a "
+            "search returns nothing: the document exists, but the exact "
+            "word searched for is spelled slightly differently.\n"
+            "2. If a spelling-corrected version has already been tried "
+            "and still found nothing, drop the most specific or unusual "
+            "word entirely (often the proper noun that might still be "
+            "wrong or too narrow) and search on the more generic "
+            "remaining terms instead.\n"
+            "3. Only after both of those, fall back to a broader or "
+            "narrower phrasing or a synonym for a term that may not "
+            "match the document's exact wording.\n"
+            "Respond with just the query, no explanation."
         )
         rewritten = await self.llm.generate_answer(question=prompt_context, context="")
         rewritten = rewritten.strip().strip('"')

@@ -65,6 +65,23 @@ risking similar phrasings across attempts.
 `backend/tests/test_langgraph_pipeline.py` asserts the full history
 reaches the prompt.
 
+Graph's Search API does exact-ish keyword matching, not fuzzy matching —
+a single misspelled proper noun is enough to return zero results even
+when a document with that exact name exists (e.g. searching "Neilstown
+Community Centre" finds nothing for a real
+`NEILLSTOWN COMMUNITY CENTRE.xlsx`, while "Community Centre" alone
+does). Left to a generic "try a synonym or broader phrasing"
+instruction, the rewrite LLM doesn't reliably think to check for a typo
+first. `_llm_rewrite_query`'s prompt spells out an explicit, staged
+strategy instead: (1) check every word for a possible spelling mistake,
+especially proper nouns, and correct it while keeping the rest of the
+query the same; (2) if a spelling-corrected version has already been
+tried, drop the most specific/unusual word entirely and search on the
+more generic remaining terms; (3) only after both of those, fall back to
+a broader/narrower phrasing or synonym.
+`test_rewrite_prompt_prioritizes_spelling_correction_before_dropping_words`
+in `backend/tests/test_langgraph_pipeline.py` covers this.
+
 `classify_intent` exists because Graph's Search API returns *some*
 document for almost any query string, by design (its relevance ranking
 doesn't require a strong match) — without this check, a message like

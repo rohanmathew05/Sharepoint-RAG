@@ -419,6 +419,32 @@ async def test_rewrite_prompt_includes_full_query_history(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rewrite_prompt_prioritizes_spelling_correction_before_dropping_words(monkeypatch):
+    """A single misspelled proper noun (e.g. "Neilstown" for the real
+    "Neillstown") is enough for Graph's keyword search to return zero
+    results even though the right document exists. The rewrite prompt
+    should explicitly tell the LLM to check for a typo first, before
+    falling back to dropping words entirely."""
+    service = LangGraphRAGService()
+    captured_prompt = {}
+
+    async def fake_generate_answer(question, context):
+        captured_prompt["question"] = question
+        return "Neillstown Community Centre"
+
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    await service._llm_rewrite_query(
+        "what is the GIS ID for neilstown community centre",
+        ["neilstown community centre"],
+    )
+
+    prompt = captured_prompt["question"]
+    assert "spelling" in prompt.lower() or "typo" in prompt.lower()
+    assert "drop" in prompt.lower()
+
+
+@pytest.mark.asyncio
 async def test_delegated_token_search_is_the_only_permission_boundary(monkeypatch):
     """The pipeline itself does no filtering — SharePointService.search()
     is called with the user object as-is, and Microsoft Graph (via the
