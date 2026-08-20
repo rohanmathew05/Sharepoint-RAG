@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import {
   AuthenticatedTemplate,
   UnauthenticatedTemplate,
@@ -32,8 +33,19 @@ function AuthenticatedApp() {
 
   async function getToken(): Promise<string> {
     const account = accounts[0];
-    const result = await instance.acquireTokenSilent({ ...loginRequest, account });
-    return result.accessToken;
+    try {
+      const result = await instance.acquireTokenSilent({ ...loginRequest, account });
+      return result.accessToken;
+    } catch (err) {
+      // MSAL's own refresh token has also expired (or conditional access
+      // requires fresh interaction) — the OBO exchange the backend would
+      // do with a stale token is guaranteed to fail, so redirect to sign
+      // in again now instead of letting the request fail server-side.
+      if (err instanceof InteractionRequiredAuthError) {
+        await instance.acquireTokenRedirect({ ...loginRequest, account });
+      }
+      throw err;
+    }
   }
 
   return (

@@ -61,7 +61,19 @@ async def get_current_user(request: Request) -> UserContext:
         # left for production wiring (see docs/SETUP.md) — this decodes
         # claims for the OBO exchange, which itself is what actually
         # proves the token is valid (Entra ID rejects a forged token).
-        claims = jwt.decode(token, options={"verify_signature": False})
+        # `verify_exp` IS enabled, though: an expired frontend token must
+        # be rejected here with a clean 401 rather than reaching the OBO
+        # exchange, where MSAL's failure is harder to distinguish from
+        # other error types.
+        claims = jwt.decode(
+            token, options={"verify_signature": False, "verify_exp": True}
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Access token expired. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
     except jwt.PyJWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

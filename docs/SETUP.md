@@ -95,3 +95,35 @@ frontend's access token as the `user_assertion`. This requires:
 - The backend's app registration to have the delegated Graph permissions
   listed above, with admin consent granted — OBO will fail with
   `AADSTS65001` (consent required) otherwise.
+
+### Mid-session token expiry
+
+The frontend's Entra ID access token and the backend's per-user cached
+Graph token (obtained via OBO) both have their own lifetimes, so either
+can go stale while a user is mid-session:
+
+- `backend/auth/entra.py` checks the inbound token's `exp` claim and
+  returns `401` immediately if it's expired, before ever attempting the
+  OBO exchange.
+- `backend/auth/obo.py` catches OBO failures and distinguishes two cases:
+  `OBOTokenExpiredError` (the user's session is gone — e.g. AAD's
+  `invalid_grant` / `AADSTS700082`) maps to a `401` with
+  `error_code: obo_token_expired`; anything else (`OBOExchangeError` —
+  bad app registration, missing consent, transient Entra ID errors) maps
+  to a `502`, so a real backend misconfiguration doesn't get misread as
+  "please sign in again."
+- On the frontend, `App.tsx`'s `getToken()` wraps
+  `acquireTokenSilent` in a try/catch: MSAL usually renews the access
+  token transparently using its own refresh token, but if that also fails
+  (`InteractionRequiredAuthError` — refresh token expired, conditional
+  access requires fresh interaction), it redirects to sign-in instead of
+  letting a doomed request reach the backend.
+- `frontend/src/api/client.ts::sendChatMessage` retries a request exactly
+  once if the backend responds `401` — covering the case where the
+  backend's *cached OBO token* went stale independently of the frontend's
+  own token, so a fresh `getToken()` call plus one retry recovers without
+  the user noticing.
+
+See `backend/tests/test_obo_expiry.py` for the behavior this produces:
+an expired frontend token or a failed OBO exchange both return a typed
+`401`/`502` instead of an unhandled `500`.

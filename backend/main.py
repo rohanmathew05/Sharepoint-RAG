@@ -1,8 +1,10 @@
 """FastAPI application entrypoint."""
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.api import auth, chat, chat_v2, search
+from backend.auth.obo import OBOExchangeError, OBOTokenExpiredError
 from backend.core.config import get_settings
 
 settings = get_settings()
@@ -29,6 +31,29 @@ app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(chat_v2.router)
 app.include_router(search.router)
+
+
+@app.exception_handler(OBOTokenExpiredError)
+async def obo_token_expired_handler(request: Request, exc: OBOTokenExpiredError) -> JSONResponse:
+    # Mid-session token expiry: tell the frontend to re-authenticate
+    # rather than showing a generic error. See docs/SETUP.md's "OBO token
+    # expiry" section.
+    return JSONResponse(
+        status_code=401,
+        content={"detail": str(exc), "error_code": "obo_token_expired"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@app.exception_handler(OBOExchangeError)
+async def obo_exchange_error_handler(request: Request, exc: OBOExchangeError) -> JSONResponse:
+    # Not a re-auth situation (bad app registration, missing admin
+    # consent, transient Entra ID error) — surface as a server error, not
+    # a silent 500 with no explanation.
+    return JSONResponse(
+        status_code=502,
+        content={"detail": str(exc), "error_code": "obo_exchange_failed"},
+    )
 
 
 @app.get("/api/health")
