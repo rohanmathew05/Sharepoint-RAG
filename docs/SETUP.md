@@ -111,10 +111,26 @@ INFO backend.services.graph: Graph search returned 0 document(s): []
 ```
 
 `total=0` here means Graph itself found nothing for that query — not a
-bug in this app's parsing. Common causes: the content isn't indexed by
-Microsoft Search yet (can lag newly uploaded/permissioned SharePoint
-content by minutes to over a day in some tenants), or the signed-in
-user genuinely doesn't have access to anything matching.
+bug in this app's parsing. In rough order of likelihood:
+
+1. **Missing/mismatched `region`.** The request body includes a
+   `"region"` field (`GRAPH_SEARCH_REGION`, default `"US"`) that Graph's
+   Search API expects — Graph Explorer's built-in sample queries default
+   to `"US"` too, which is easy to miss as "just part of the sample" when
+   comparing a working Explorer call against a custom app's request that
+   omits it entirely. If search still returns nothing for content you've
+   confirmed exists (e.g. via the same query in Graph Explorer), try
+   setting `GRAPH_SEARCH_REGION` to your tenant's actual region (ISO
+   3166-1 alpha-3, e.g. `IRL`, `GBR`) instead of the `US` default.
+2. **Content not indexed by Microsoft Search yet** — can lag newly
+   uploaded/permissioned SharePoint content by minutes to over a day in
+   some tenants.
+3. **The signed-in user genuinely doesn't have access** to anything
+   matching (the system working as intended, not a bug).
+
+The `Graph token scopes (scp claim)` log line (also emitted per request)
+tells you whether the OBO-derived token even carries `Sites.Read.All` —
+check that before chasing (1)/(2)/(3) above.
 
 To also see the raw JSON Graph returned (useful if `total` looks wrong,
 or hits are present but not parsing into documents), run with
