@@ -11,6 +11,7 @@ passes through exactly what Graph returns.
 import logging
 
 import httpx
+import jwt
 
 from backend.core.config import get_settings
 from backend.models.documents import DriveInfo, SiteInfo, SourceDocument
@@ -51,6 +52,26 @@ def _build_kql_query(question: str) -> str:
     if not keywords:
         return question
     return " OR ".join(keywords)
+
+
+def _log_token_scopes(token: str) -> None:
+    """Logs the delegated permissions actually carried by the OBO-derived
+    Graph token — not the token itself. Microsoft Search silently returns
+    total: 0 (a normal 200, not a 403) when the calling token lacks
+    sufficient permission, which is indistinguishable from "nothing
+    matched" unless you can see what the token was actually granted.
+    Compare this against what Graph Explorer's own token carries for the
+    same query, or check the app registration's API permissions blade for
+    Sites.Read.All showing a green "Granted" status, not a warning icon.
+    """
+    try:
+        # Decoding without verifying the signature is fine here — we only
+        # want to read the scp claim for a log line, not authenticate
+        # anything with it.
+        claims = jwt.decode(token, options={"verify_signature": False})
+        logger.info("Graph token scopes (scp claim): %s", claims.get("scp", "<missing>"))
+    except jwt.PyJWTError as exc:
+        logger.warning("Could not decode Graph token to log its scopes: %s", exc)
 
 
 class GraphAPIError(Exception):
@@ -101,6 +122,7 @@ class GraphService:
             "Content-Type": "application/json",
         }
         logger.info("Graph search request: original=%r kql=%r size=%d", query, kql_query, size)
+        _log_token_scopes(self.graph_token)
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(GRAPH_SEARCH_URL, json=body, headers=headers)
