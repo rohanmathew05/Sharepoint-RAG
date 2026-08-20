@@ -18,7 +18,6 @@ export function ChatWindow({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [useLangGraph, setUseLangGraph] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -32,7 +31,7 @@ export function ChatWindow({
     setIsLoading(true);
 
     try {
-      const response = await sendChatMessage(question, nextMessages, getToken, useLangGraph);
+      const response = await sendChatMessage(question, nextMessages, getToken);
       setMessages([
         ...nextMessages,
         { role: "assistant", content: response.answer, citations: response.citations },
@@ -57,16 +56,6 @@ export function ChatWindow({
 
   return (
     <div className="chat-window">
-      <div className="pipeline-toggle">
-        <label>
-          <input
-            type="checkbox"
-            checked={useLangGraph}
-            onChange={(e) => setUseLangGraph(e.target.checked)}
-          />
-          Use LangGraph pipeline (query rewriting + retrieval evaluation)
-        </label>
-      </div>
       <div className="chat-history">
         {messages.length === 0 && (
           <div className="empty-state">

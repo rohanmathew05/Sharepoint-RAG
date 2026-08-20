@@ -118,12 +118,11 @@ npm run dev
 - Azure OpenAI credentials stay server-side; never shipped to the browser
 - Source citations link back to the original SharePoint document
 
-## V2: LangGraph orchestration
+## LangGraph orchestration
 
-A second RAG pipeline, `POST /api/chat/v2`, adds LangGraph-based
-multi-step orchestration on top of the same permission-aware
-`SharePointService`: query rewriting, retrieval evaluation, and bounded
-re-search when the first attempt comes back empty. See
-[`docs/LANGGRAPH.md`](docs/LANGGRAPH.md) for the graph and why it doesn't
-change the security model. Toggle it in the frontend with the "Use
-LangGraph pipeline" checkbox above the chat input.
+The chat pipeline (`POST /api/chat/v2`, the only endpoint the frontend
+calls) is LangGraph-based multi-step orchestration on top of the
+permission-aware `SharePointService`: intent classification, query
+rewriting, retrieval evaluation, and bounded re-search when the first
+attempt comes back empty. See [`docs/LANGGRAPH.md`](docs/LANGGRAPH.md)
+for the graph and why it doesn't change the security model.

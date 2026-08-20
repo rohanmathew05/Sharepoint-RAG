@@ -120,5 +120,5 @@ curl -X POST http://localhost:8000/api/chat/v2 \
 Response includes `retrieval_attempts` — `1` if the first search found
 something relevant, higher if it had to rewrite and retry.
 
-In the frontend, tick "Use LangGraph pipeline" above the chat input to
-route requests to `/api/chat/v2` instead of `/api/chat`.
+The frontend always routes through `/api/chat/v2` (`frontend/src/api/client.ts::CHAT_ENDPOINT`)
+— there's no toggle, this is the only chat pipeline the UI calls.
