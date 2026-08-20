@@ -161,6 +161,7 @@ class LangGraphRAGService:
     # --- nodes -----------------------------------------------------------
 
     async def _analyze_query(self, state: RAGState) -> dict:
+        logger.info("[analyze_query] question=%r", state["question"])
         return {"search_query": state["question"].strip(), "retrieval_attempts": 0}
 
     async def _classify_intent(self, state: RAGState) -> dict:
@@ -181,22 +182,35 @@ class LangGraphRAGService:
             # when the classifier call itself is unavailable.
             logger.warning("Intent classification failed; falling back to heuristic", exc_info=True)
             needs_retrieval = not _is_chitchat(question)
-        logger.info("Intent classification: question=%r needs_retrieval=%s", question, needs_retrieval)
+        logger.info("[classify_intent] question=%r needs_retrieval=%s", question, needs_retrieval)
         return {"needs_retrieval": needs_retrieval}
 
     def _route_after_classify(self, state: RAGState) -> str:
-        return "search" if state["needs_retrieval"] else "skip"
+        route = "search" if state["needs_retrieval"] else "skip"
+        logger.info("[route_after_classify] -> %s", route)
+        return route
 
     async def _answer_conversationally(self, state: RAGState) -> dict:
+        logger.info("[answer_conversationally] skipping SharePoint search entirely")
         return {"answer": _CHITCHAT_REPLY, "citations": []}
 
     async def _search(self, state: RAGState) -> dict:
+        attempt = state["retrieval_attempts"] + 1
+        logger.info(
+            "[search] attempt=%d/%d query=%r", attempt, state.get("max_retries", MAX_RETRIES), state["search_query"]
+        )
         documents = await self.sharepoint.search(
             state["user"], state["search_query"], max_results=self.settings.MAX_SEARCH_RESULTS
         )
+        logger.info(
+            "[search] attempt=%d found %d document(s): %s",
+            attempt,
+            len(documents),
+            [d.document_name for d in documents],
+        )
         return {
             "documents": documents,
-            "retrieval_attempts": state["retrieval_attempts"] + 1,
+            "retrieval_attempts": attempt,
             "previous_queries": state["previous_queries"] + [state["search_query"]],
         }
 
@@ -215,17 +229,33 @@ class LangGraphRAGService:
         except Exception:
             logger.warning("Relevance evaluation failed; defaulting to relevant", exc_info=True)
             is_relevant = len(state["documents"]) > 0
+        logger.info(
+            "[evaluate] attempt=%d is_relevant=%s context_chars=%d",
+            state["retrieval_attempts"],
+            is_relevant,
+            len(context),
+        )
         return {"is_relevant": is_relevant, "prompt_context": context}
 
     def _route_after_evaluate(self, state: RAGState) -> str:
         if state["is_relevant"]:
-            return "generate"
-        if state["retrieval_attempts"] >= state.get("max_retries", MAX_RETRIES):
-            return "generate"  # give up rewriting, answer with what we have (none)
-        return "rewrite"
+            route = "generate"
+        elif state["retrieval_attempts"] >= state.get("max_retries", MAX_RETRIES):
+            route = "generate"  # give up rewriting, answer with what we have (none)
+        else:
+            route = "rewrite"
+        logger.info(
+            "[route_after_evaluate] is_relevant=%s attempt=%d/%d -> %s",
+            state["is_relevant"],
+            state["retrieval_attempts"],
+            state.get("max_retries", MAX_RETRIES),
+            route,
+        )
+        return route
 
     async def _rewrite_query(self, state: RAGState) -> dict:
         rewritten = await self._llm_rewrite_query(state["question"], state["previous_queries"])
+        logger.info("[rewrite_query] %r -> %r", state["search_query"], rewritten)
         return {"search_query": rewritten}
 
     async def _generate_answer(self, state: RAGState) -> dict:
@@ -245,6 +275,12 @@ class LangGraphRAGService:
             )
             for d in documents
         ]
+        logger.info(
+            "[generate_answer] %d citation(s), answer_chars=%d, total_attempts=%d",
+            len(citations),
+            len(answer),
+            state["retrieval_attempts"],
+        )
         return {"answer": answer, "citations": citations}
 
     # --- helpers -----------------------------------------------------------
@@ -283,6 +319,7 @@ class LangGraphRAGService:
     # --- public API --------------------------------------------------------
 
     async def answer_question(self, user: UserContext, question: str) -> ChatResponse:
+        logger.info("=== LangGraph run start: user=%s question=%r ===", user.upn, question)
         initial_state: RAGState = {
             "question": question,
             "user": user,
@@ -299,6 +336,12 @@ class LangGraphRAGService:
         }
         final_state = await self.graph.ainvoke(
             initial_state, config={"recursion_limit": _RECURSION_LIMIT}
+        )
+        logger.info(
+            "=== LangGraph run end: attempts=%d citations=%d queries_tried=%s ===",
+            final_state["retrieval_attempts"],
+            len(final_state["citations"]),
+            final_state["previous_queries"],
         )
         return ChatResponse(
             answer=final_state["answer"],
