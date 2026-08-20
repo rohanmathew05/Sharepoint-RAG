@@ -1,11 +1,18 @@
 """Centralized application settings, loaded from environment variables."""
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Always resolve .env relative to this file (backend/.env), not the
+# process's current working directory — the app is meant to be launched
+# as `uvicorn backend.main:app` from the repo root (see README), so cwd
+# is the repo root, not backend/.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     # --- Microsoft Entra ID ---
     ENTRA_TENANT_ID: str = ""

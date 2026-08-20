@@ -84,13 +84,19 @@ end-to-end with zero cloud setup.
 
 **Backend**
 
+Run these from the **repo root** (not from inside `backend/`) — the code
+uses absolute imports like `from backend.api import ...`, which need the
+repo root on `sys.path`, not `backend/` itself:
+
 ```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn main:app --reload --port 8000
+python -m venv backend/.venv && source backend/.venv/bin/activate
+pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env
+uvicorn backend.main:app --reload --port 8000
 ```
+
+(On Windows PowerShell: `backend\.venv\Scripts\Activate.ps1` instead of
+the `source` line.)
 
 **Frontend**
 

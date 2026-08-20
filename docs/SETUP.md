@@ -27,8 +27,7 @@ registration:
 ## 2. Configure the backend
 
 ```bash
-cd backend
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 Fill in:
@@ -77,8 +76,9 @@ table in `backend/services/demo_data.py`, is enforcing the boundary.
 ## 5. Run it
 
 ```bash
-# backend
-cd backend && uvicorn main:app --reload --port 8000
+# backend — from the repo root (imports are absolute, e.g.
+# `from backend.api import ...`, so backend/ itself can't be cwd)
+uvicorn backend.main:app --reload --port 8000
 
 # frontend
 cd frontend && npm run dev
