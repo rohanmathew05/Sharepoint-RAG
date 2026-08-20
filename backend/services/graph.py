@@ -16,6 +16,18 @@ from backend.models.documents import DriveInfo, SiteInfo, SourceDocument
 GRAPH_SEARCH_URL = "https://graph.microsoft.com/v1.0/search/query"
 
 
+class GraphAPIError(Exception):
+    """Raised when Microsoft Graph itself returns a non-2xx response —
+    as opposed to an OBO/auth failure (see backend/auth/obo.py), this
+    means the token was fine but the request to Graph failed for some
+    other reason (rate limiting, a transient 5xx, a malformed query)."""
+
+    def __init__(self, message: str, status_code: int, retry_after: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
 class GraphService:
     def __init__(self, graph_token: str):
         self.graph_token = graph_token
@@ -52,8 +64,22 @@ class GraphService:
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(GRAPH_SEARCH_URL, json=body, headers=headers)
-            resp.raise_for_status()
-            payload = resp.json()
+
+        if resp.status_code == 429:
+            # Graph's Search API has fairly tight rate limits — this is
+            # not a permission or auth problem, just "try again shortly".
+            raise GraphAPIError(
+                "Microsoft Graph rate-limited this request. Please try again in a moment.",
+                status_code=429,
+                retry_after=resp.headers.get("Retry-After"),
+            )
+        if resp.is_error:
+            raise GraphAPIError(
+                f"Microsoft Graph search failed: {resp.status_code} {resp.text[:300]}",
+                status_code=resp.status_code,
+            )
+
+        payload = resp.json()
 
         results: list[SourceDocument] = []
         hits_containers = payload.get("value", [{}])[0].get("hitsContainers", [])
