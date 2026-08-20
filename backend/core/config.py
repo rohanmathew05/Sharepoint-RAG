@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # Scope the backend requests from Entra ID when exchanging the user's
     # token for a Graph token via the On-Behalf-Of flow.
     GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
+    # Microsoft's Search API (/search/query) expects a "region" in the
+    # request body. Graph Explorer's built-in samples default to "US" and
+    # a custom app that omits it entirely can get back total: 0 even for
+    # content that genuinely exists and matches. ISO 3166-1 alpha-3 code
+    # (e.g. "IRL", "GBR") — set this to wherever your tenant's data
+    # actually resides if results still look wrong with the default.
+    GRAPH_SEARCH_REGION: str = "US"
 
     # --- Azure OpenAI ---
     AZURE_OPENAI_API_KEY: str = ""
