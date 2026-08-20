@@ -46,12 +46,17 @@ async def test_llm_says_chitchat_skips_search_entirely(monkeypatch):
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("search should not be reached when the LLM says chitchat")
 
+    async def fake_conversational_reply(question: str) -> str:
+        return "Hey there! Ask me anything about the SharePoint docs."
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fail_if_called)
+    monkeypatch.setattr(service.llm, "generate_conversational_reply", fake_conversational_reply)
 
     response = await service.answer_question(USER_A, "anything at all")
     assert response.citations == []
     assert response.retrieval_attempts == 0
+    assert response.answer == "Hey there! Ask me anything about the SharePoint docs."
 
 
 @pytest.mark.asyncio
@@ -67,9 +72,13 @@ async def test_llm_says_search_triggers_retrieval(monkeypatch):
     async def fake_generate_answer(question, context):
         return "no relevant documents found"
 
+    async def fake_clarification(question, attempted_queries):
+        return "I couldn't find that — could you give me a document name or reference number?"
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
 
     response = await service.answer_question(USER_A, "what are the coordinates")
     assert response.retrieval_attempts >= 1
@@ -85,8 +94,12 @@ async def test_classification_failure_falls_back_to_heuristic(monkeypatch):
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("search should not be reached for an obvious greeting")
 
+    async def fake_conversational_reply(question: str) -> str:
+        return "Hi there!"
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
     monkeypatch.setattr(service.sharepoint, "search", fail_if_called)
+    monkeypatch.setattr(service.llm, "generate_conversational_reply", fake_conversational_reply)
 
     # A genuine greeting should still be caught by the heuristic fallback
     # even though the classifier call itself failed.
@@ -108,9 +121,13 @@ async def test_classification_failure_on_real_question_still_searches(monkeypatc
     async def fake_generate_answer(question, context):
         return "no relevant documents found"
 
+    async def fake_clarification(question, attempted_queries):
+        return "I couldn't find that — could you give me a document name or reference number?"
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
 
     # Not a greeting, so the heuristic fallback should still trigger a
     # search rather than silently skipping a real question.
@@ -234,10 +251,14 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
     async def fake_rewrite(original_question, previous_queries):
         return f"{previous_queries[-1]} broader"
 
+    async def fake_clarification(question, attempted_queries):
+        return "I couldn't find that — could you give me a document name or reference number?"
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
     monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
 
     response = await service.answer_question(USER_A, "something nobody has")
 
@@ -248,6 +269,70 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
     # Each retry actually used a different query, not the same one
     # repeated MAX_RETRIES times.
     assert len(set(search_calls)) == MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retries_use_llm_generated_clarification(monkeypatch):
+    """Once every retry is exhausted without a relevant result, the final
+    answer should be whatever the clarification LLM call returns — not a
+    hardcoded string, and not the raw ungrounded generate_answer output
+    that reads like a broken error message."""
+    service = LangGraphRAGService()
+    captured_attempts: list[list[str]] = []
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return []  # never finds anything
+
+    async def fake_rewrite(original_question, previous_queries):
+        return f"{previous_queries[-1]} broader"
+
+    async def fake_clarification(question, attempted_queries):
+        captured_attempts.append(list(attempted_queries))
+        return "I couldn't find a match — could you share the exact site name or a reference number?"
+
+    async def fail_if_called(question, context):
+        raise AssertionError("generate_answer should not be used once retries are exhausted")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+    monkeypatch.setattr(service.llm, "generate_answer", fail_if_called)
+
+    response = await service.answer_question(USER_A, "what is the wfv number for tullylost")
+
+    assert response.answer == (
+        "I couldn't find a match — could you share the exact site name or a reference number?"
+    )
+    assert response.citations == []
+    assert len(captured_attempts) == 1
+    assert len(captured_attempts[0]) > 0  # full query history was passed through
+
+
+@pytest.mark.asyncio
+async def test_chitchat_reply_is_llm_generated(monkeypatch):
+    """The greeting/chitchat response should come from a genuine LLM
+    call, not a hardcoded canned string, so it actually reflects what
+    the user said."""
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return False  # LLM verdict: CHITCHAT
+
+    async def fake_conversational_reply(question: str) -> str:
+        assert question == "good morning!"
+        return "Good morning! Happy to help you find anything in the SharePoint docs."
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "generate_conversational_reply", fake_conversational_reply)
+
+    response = await service.answer_question(USER_A, "good morning!")
+
+    assert response.answer == "Good morning! Happy to help you find anything in the SharePoint docs."
+    assert response.citations == []
 
 
 @pytest.mark.asyncio
@@ -295,9 +380,13 @@ async def test_delegated_token_search_is_the_only_permission_boundary(monkeypatc
     async def fake_generate_answer(question, context):
         return "no relevant documents found"
 
+    async def fake_clarification(question, attempted_queries):
+        return "I couldn't find that — could you give me a document name or reference number?"
+
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
     monkeypatch.setattr(service.sharepoint, "search", fake_search)
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
 
     await service.answer_question(USER_A, "what are the coordinates")
 

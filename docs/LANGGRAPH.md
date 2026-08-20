@@ -71,12 +71,14 @@ doesn't require a strong match) — without this check, a message like
 nothing to do with what was actually asked.
 
 The classification itself is a genuine (tiny) LLM call —
-`AzureOpenAIService.classify_needs_retrieval`, capped at `max_tokens=10`
-and `temperature=0` since the entire response is meant to be one word
-(`SEARCH` or `CHITCHAT`). Intent is a judgment call a classifier handles
-better than a fixed word-list ever could ("what's the deadline" vs.
-"what's up"), and at ~10 output tokens it costs a small fraction of an
-actual generation call.
+`AzureOpenAIService.classify_needs_retrieval`, at `temperature=0` since
+it's a yes/no judgment call, not open-ended generation. It uses Azure
+OpenAI's structured outputs (`client.beta.chat.completions.parse(...,
+response_format=IntentClassification)`), so the verdict is a typed
+`needs_retrieval: bool` on a Pydantic model, not a word to
+substring-match — there's no ambiguous free-text response to interpret.
+Intent is a judgment call a classifier handles better than a fixed
+word-list ever could ("what's the deadline" vs. "what's up").
 
 If that call fails for any reason, `_classify_intent` falls back to
 `_is_chitchat`: an exact match against a small greeting/chitchat set,
@@ -84,8 +86,14 @@ never a substring match, so a real question that happens to contain a
 greeting-like word ("hi-vis vest requirements") isn't misclassified.
 This is resilience for a failed classifier call, not a demo mode — this
 app always talks to real Azure OpenAI/Graph, there is no offline path.
-Either outcome routes chitchat to a canned reply with no Graph call at
-all.
+
+Either outcome routes to `answer_conversationally`, which asks
+`AzureOpenAIService.generate_conversational_reply` for a genuine
+LLM-generated reply — not a hardcoded string — so the response actually
+reflects what the user said rather than printing the same sentence for
+every greeting. If that call fails, a fixed fallback string
+(`_FALLBACK_CHITCHAT_REPLY`) is used so the user still gets a response.
+No Graph call happens on this path either way.
 
 ## Where each requirement from the spec is implemented
 
@@ -106,12 +114,34 @@ snippet centers on a different field of the same sheet). A presence
 check calls that "relevant" and generates a confident "not found"
 answer from context that was never going to answer the question. Now
 `_evaluate` builds the same context `_generate_answer` will use and
-asks `AzureOpenAIService.evaluate_relevance` (also `max_tokens=10`,
-`temperature=0`) whether it actually answers the question — not just
-whether it's on-topic. A NOT_RELEVANT verdict routes back into
+asks `AzureOpenAIService.evaluate_relevance` (`temperature=0`, structured
+output via `response_format=RelevanceEvaluation`) whether it actually
+answers the question — not just whether it's on-topic, and not a word to
+substring-match. A `is_relevant=False` verdict routes back into
 `rewrite_query` exactly like an empty search would.
 `test_llm_relevance_check_triggers_retry_on_unhelpful_snippet` in
 `backend/tests/test_langgraph_pipeline.py` covers this directly.
+
+### What happens when every retry is exhausted
+
+If `retrieval_attempts` hits `MAX_RETRIES` without ever finding relevant
+content, `_route_after_evaluate` still routes to `generate_answer` — but
+`_generate_answer` checks `state["is_relevant"]` first. When it's still
+`False` at that point, it doesn't run the normal grounded
+`generate_answer` call (which, given only unhelpful/empty context,
+tends to produce a stilted "the provided excerpts do not contain..."
+style answer that reads like a broken error message rather than a
+useful response). Instead it calls
+`AzureOpenAIService.generate_clarification(question, previous_queries)`
+— a genuine LLM call, not a hardcoded string — which is told the
+question and every search query already tried, and asked to explain
+in natural language that nothing was found and suggest what specific
+detail (an exact document name, a reference number, a different term)
+would help. No citations are returned on this path, since no document
+was ever confirmed relevant. If the call itself fails, a fixed fallback
+string (`_FALLBACK_CLARIFICATION_REPLY`) is used instead of leaving the
+user with nothing. `test_exhausted_retries_use_llm_generated_clarification`
+in `backend/tests/test_langgraph_pipeline.py` covers this path.
 
 Follow-up question handling and tool calling are natural next steps on
 this same graph (e.g. a `conversation_history`-aware `analyze_query`

@@ -84,10 +84,17 @@ _CHITCHAT_MESSAGES = {
     "ok", "okay", "sure", "cool", "nice", "great", "test",
 }
 
-_CHITCHAT_REPLY = (
+_FALLBACK_CHITCHAT_REPLY = (
     "Hi! Ask me a question about your company's SharePoint documents — "
     'for example, "What PPE is required for confined space work?" — and '
     "I'll search what you have access to and cite the sources."
+)
+
+_FALLBACK_CLARIFICATION_REPLY = (
+    "I couldn't find anything in the documents I have access to that "
+    "answers this. Could you share a bit more detail — an exact "
+    "document or site name, a reference number, or a different way of "
+    "describing what you're looking for?"
 )
 
 
@@ -192,7 +199,12 @@ class LangGraphRAGService:
 
     async def _answer_conversationally(self, state: RAGState) -> dict:
         logger.info("[answer_conversationally] skipping SharePoint search entirely")
-        return {"answer": _CHITCHAT_REPLY, "citations": []}
+        try:
+            answer = await self.llm.generate_conversational_reply(state["question"])
+        except Exception:
+            logger.warning("Conversational reply generation failed; using fallback", exc_info=True)
+            answer = _FALLBACK_CHITCHAT_REPLY
+        return {"answer": answer or _FALLBACK_CHITCHAT_REPLY, "citations": []}
 
     async def _search(self, state: RAGState) -> dict:
         attempt = state["retrieval_attempts"] + 1
@@ -259,6 +271,29 @@ class LangGraphRAGService:
         return {"search_query": rewritten}
 
     async def _generate_answer(self, state: RAGState) -> dict:
+        # Arriving here with is_relevant=False means every retry was
+        # exhausted without finding anything that actually answers the
+        # question — a normal grounded generate_answer call in that case
+        # produces the "the provided excerpts do not contain..." style
+        # answer, which reads like a broken error message rather than a
+        # helpful response. Ask the LLM for a natural clarification
+        # instead, and don't cite documents that were never confirmed
+        # relevant.
+        if not state["is_relevant"]:
+            try:
+                answer = await self.llm.generate_clarification(
+                    state["question"], state["previous_queries"]
+                )
+            except Exception:
+                logger.warning("Clarification generation failed; using fallback", exc_info=True)
+                answer = ""
+            answer = answer or _FALLBACK_CLARIFICATION_REPLY
+            logger.info(
+                "[generate_answer] no relevant content found, returning clarification, total_attempts=%d",
+                state["retrieval_attempts"],
+            )
+            return {"answer": answer, "citations": []}
+
         documents = state["documents"]
         # Reuse the context _evaluate already built for this same
         # documents list rather than rebuilding it — evaluate always
