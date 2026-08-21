@@ -6,7 +6,7 @@ import { MsalProvider } from "@azure/msal-react";
 import App from "./App";
 import { msalConfig } from "./authConfig";
 import { recordAuthError } from "./authEvents";
-import "./styles.css";
+import "./index.css";
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
 
