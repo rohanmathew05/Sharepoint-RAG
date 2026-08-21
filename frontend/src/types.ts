@@ -11,6 +11,7 @@ export interface ChatMessage {
   content: string;
   citations?: Citation[];
   isError?: boolean;
+  retrievalAttempts?: number;
 }
 
 export interface ChatResponse {

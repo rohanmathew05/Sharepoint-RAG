@@ -1,5 +1,6 @@
 import type { ChatMessage, Citation } from "../types";
 import { SourcesPill } from "./SourcesPill";
+import { ReasoningSteps } from "./ReasoningSteps";
 
 export function MessageBubble({
   message,
@@ -20,6 +21,12 @@ export function MessageBubble({
               : "bg-surface-alt text-foreground"
         }`}
       >
+        {!isUser && !message.isError && message.retrievalAttempts !== undefined && (
+          <ReasoningSteps
+            retrievalAttempts={message.retrievalAttempts}
+            citationCount={message.citations?.length ?? 0}
+          />
+        )}
         <p className="m-0 whitespace-pre-wrap leading-relaxed">{message.content}</p>
         {message.citations && message.citations.length > 0 && (
           <SourcesPill citations={message.citations} onOpen={onOpenSources} />

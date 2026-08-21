@@ -37,7 +37,12 @@ export function ChatWindow({
       const response = await sendChatMessage(question, nextMessages, getToken);
       setMessages([
         ...nextMessages,
-        { role: "assistant", content: response.answer, citations: response.citations },
+        {
+          role: "assistant",
+          content: response.answer,
+          citations: response.citations,
+          retrievalAttempts: response.retrieval_attempts,
+        },
       ]);
     } catch (err) {
       if (err instanceof SessionExpiredError && onSessionExpired) {
