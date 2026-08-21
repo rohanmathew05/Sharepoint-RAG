@@ -26,13 +26,13 @@ export function MessageBubble({
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+        className={
           message.isError
-            ? "bg-destructive/10 text-destructive"
+            ? "max-w-[80%] rounded-2xl bg-destructive/10 px-4 py-3 text-destructive"
             : isUser
-              ? "bg-primary text-primary-foreground"
-              : "bg-surface-alt text-foreground"
-        }`}
+              ? "max-w-[80%] rounded-2xl bg-primary px-4 py-3 text-primary-foreground"
+              : "max-w-full text-foreground"
+        }
       >
         {hasReasoning && !message.isError && (
           <ReasoningSteps steps={message.reasoningSteps ?? []} live={message.isStreaming} />
