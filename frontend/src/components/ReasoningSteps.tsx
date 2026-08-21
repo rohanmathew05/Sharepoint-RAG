@@ -44,7 +44,7 @@ export function ReasoningSteps({ steps, live }: { steps: ReasoningStepData[]; li
         <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="mt-3 rounded-lg border border-border bg-surface px-3 py-3">
+        <div className="mt-3">
           <ChainOfThought steps={toChainOfThoughtSteps(steps)} />
         </div>
       )}
