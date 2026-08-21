@@ -4,6 +4,8 @@ Credentials are read from environment variables server-side only (see
 backend/core/config.py) and are never returned to, or reachable from, the
 React frontend.
 """
+from typing import AsyncIterator
+
 from openai import AsyncAzureOpenAI
 from pydantic import BaseModel
 
@@ -94,6 +96,57 @@ class AzureOpenAIService:
             temperature=0.2,
         )
         return response.choices[0].message.content or ""
+
+    async def _stream_deltas(self, **create_kwargs) -> AsyncIterator[str]:
+        client = self._get_client()
+        stream = await client.chat.completions.create(**create_kwargs, stream=True)
+        async for chunk in stream:
+            if not chunk.choices:
+                continue  # final usage-only chunk some deployments send has no choices
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    def generate_answer_stream(self, question: str, context: str) -> AsyncIterator[str]:
+        return self._stream_deltas(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {question}",
+                },
+            ],
+            temperature=0.2,
+        )
+
+    def generate_conversational_reply_stream(self, question: str) -> AsyncIterator[str]:
+        return self._stream_deltas(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": CONVERSATIONAL_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            temperature=0.5,
+        )
+
+    def generate_clarification_stream(
+        self, question: str, attempted_queries: list[str]
+    ) -> AsyncIterator[str]:
+        attempts_text = "\n".join(f"- {q}" for q in attempted_queries) or "- (none)"
+        return self._stream_deltas(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": CLARIFICATION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question: {question}\n\nSearch queries already tried:\n{attempts_text}"
+                    ),
+                },
+            ],
+            temperature=0.5,
+        )
 
     async def generate_conversational_reply(self, question: str) -> str:
         """A genuine LLM-generated reply for greetings/chitchat — not a

@@ -44,13 +44,13 @@ retrying never bypasses that — it only changes what gets searched for,
 not who is allowed to see the results.
 """
 import logging
-from typing import TypedDict
+from typing import AsyncIterator, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from backend.core.config import get_settings
 from backend.models.auth import UserContext
-from backend.models.chat import ChatResponse
+from backend.models.chat import ChatResponse, ReasoningStep
 from backend.models.documents import Citation, SourceDocument
 from backend.services.azure_openai import AzureOpenAIService
 from backend.services.sharepoint import SharePointService
@@ -130,6 +130,16 @@ class RAGState(TypedDict):
     best_context: str
     answer: str
     citations: list[Citation]
+    # Real execution trace surfaced to the frontend's collapsible
+    # "chain of thought" display — see ReasoningStep. Appended to (never
+    # mutated in place) by each node, the same way previous_queries is.
+    reasoning_steps: list[dict]
+    # Set by _decide_generation (via _prepare_generation for the
+    # streaming graph, or inline in _generate_answer for the non-streaming
+    # one) so the streaming path knows what to generate without having to
+    # re-derive it from is_relevant/best_context itself.
+    generation_mode: str
+    generation_context: str
 
 
 class LangGraphRAGService:
@@ -144,17 +154,27 @@ class LangGraphRAGService:
         self.sharepoint = SharePointService()
         self.llm = AzureOpenAIService()
         self.graph = self._build_graph()
+        # Same graph, but stops right before the final LLM call (see
+        # _prepare_generation / _prepare_conversational) instead of
+        # generating the full answer in one shot — stream_answer() does
+        # the actual (streamed) generation itself once this finishes, so
+        # token deltas can be yielded as they arrive.
+        self.graph_stream = self._build_graph(streaming=True)
 
-    def _build_graph(self):
+    def _build_graph(self, streaming: bool = False):
         graph = StateGraph(RAGState)
 
         graph.add_node("analyze_query", self._analyze_query)
         graph.add_node("classify_intent", self._classify_intent)
-        graph.add_node("answer_conversationally", self._answer_conversationally)
         graph.add_node("search", self._search)
         graph.add_node("evaluate", self._evaluate)
         graph.add_node("rewrite_query", self._rewrite_query)
-        graph.add_node("generate_answer", self._generate_answer)
+        if streaming:
+            graph.add_node("answer_conversationally", self._prepare_conversational)
+            graph.add_node("generate_answer", self._prepare_generation)
+        else:
+            graph.add_node("answer_conversationally", self._answer_conversationally)
+            graph.add_node("generate_answer", self._generate_answer)
 
         graph.set_entry_point("analyze_query")
         graph.add_edge("analyze_query", "classify_intent")
@@ -177,9 +197,18 @@ class LangGraphRAGService:
 
     # --- nodes -----------------------------------------------------------
 
+    @staticmethod
+    def _step(kind: str, label: str, detail: str | None = None) -> dict:
+        return {"kind": kind, "label": label, "detail": detail}
+
     async def _analyze_query(self, state: RAGState) -> dict:
         logger.info("[analyze_query] question=%r", state["question"])
-        return {"search_query": state["question"].strip(), "retrieval_attempts": 0}
+        step = self._step("understand", "Understanding the question")
+        return {
+            "search_query": state["question"].strip(),
+            "retrieval_attempts": 0,
+            "reasoning_steps": state["reasoning_steps"] + [step],
+        }
 
     async def _classify_intent(self, state: RAGState) -> dict:
         # A greeting ("hi", "thanks", ...) never warrants a SharePoint
@@ -207,14 +236,26 @@ class LangGraphRAGService:
         logger.info("[route_after_classify] -> %s", route)
         return route
 
+    async def _prepare_conversational(self, state: RAGState) -> dict:
+        logger.info("[prepare_conversational] skipping SharePoint search entirely")
+        step = self._step("skip", "Answering directly", "No document search needed for this message.")
+        return {
+            "generation_mode": "conversational",
+            "reasoning_steps": state["reasoning_steps"] + [step],
+        }
+
     async def _answer_conversationally(self, state: RAGState) -> dict:
-        logger.info("[answer_conversationally] skipping SharePoint search entirely")
+        prepared = await self._prepare_conversational(state)
         try:
             answer = await self.llm.generate_conversational_reply(state["question"])
         except Exception:
             logger.warning("Conversational reply generation failed; using fallback", exc_info=True)
             answer = _FALLBACK_CHITCHAT_REPLY
-        return {"answer": answer or _FALLBACK_CHITCHAT_REPLY, "citations": []}
+        return {
+            "answer": answer or _FALLBACK_CHITCHAT_REPLY,
+            "citations": [],
+            "reasoning_steps": prepared["reasoning_steps"],
+        }
 
     async def _search(self, state: RAGState) -> dict:
         attempt = state["retrieval_attempts"] + 1
@@ -230,10 +271,18 @@ class LangGraphRAGService:
             len(documents),
             [d.document_name for d in documents],
         )
+        step = self._step(
+            "search",
+            f'Searching for "{state["search_query"]}"',
+            f"Found {len(documents)} document(s)."
+            if documents
+            else "No documents found.",
+        )
         return {
             "documents": documents,
             "retrieval_attempts": attempt,
             "previous_queries": state["previous_queries"] + [state["search_query"]],
+            "reasoning_steps": state["reasoning_steps"] + [step],
         }
 
     async def _evaluate(self, state: RAGState) -> dict:
@@ -269,6 +318,15 @@ class LangGraphRAGService:
             result["best_documents"] = state["documents"]
             result["best_context"] = context
 
+        if is_relevant:
+            detail = "Relevant — using these documents to answer."
+        elif state["retrieval_attempts"] >= state.get("max_retries", MAX_RETRIES):
+            detail = "Not relevant, but no retries left — using the best result found."
+        else:
+            detail = "Not directly relevant — trying another search."
+        step = self._step("evaluate", "Checking relevance", detail)
+        result["reasoning_steps"] = state["reasoning_steps"] + [step]
+
         return result
 
     def _route_after_evaluate(self, state: RAGState) -> str:
@@ -292,17 +350,62 @@ class LangGraphRAGService:
         logger.info("[rewrite_query] %r -> %r", state["search_query"], rewritten)
         return {"search_query": rewritten}
 
-    async def _generate_answer(self, state: RAGState) -> dict:
-        # Arriving here with is_relevant=False means the *last* attempt
-        # wasn't judged relevant — but that doesn't mean nothing useful
-        # was ever found. An earlier attempt can find the right document
-        # and get marked not-relevant, and a later rewrite can then find
-        # nothing at all; without best_documents/best_context, that
-        # earlier find would be silently lost and this would always fall
-        # to a clarification even when real candidate content exists.
-        # Only when nothing was ever found (best_context still empty) do
-        # we skip straight to asking for more detail.
+    def _decide_generation(self, state: RAGState) -> dict:
+        """Pure decision logic shared by the non-streaming _generate_answer
+        node and the streaming graph's _prepare_generation node: which mode
+        to generate in, and — for a grounded answer — the context and
+        citations to use. Never calls the LLM itself, so the streaming
+        path can run this, then stream tokens outside the graph.
+
+        Arriving here with is_relevant=False means the *last* attempt
+        wasn't judged relevant — but that doesn't mean nothing useful was
+        ever found. An earlier attempt can find the right document and
+        get marked not-relevant, and a later rewrite can then find nothing
+        at all; without best_documents/best_context, that earlier find
+        would be silently lost and this would always fall to a
+        clarification even when real candidate content exists. Only when
+        nothing was ever found (best_context still empty) do we skip
+        straight to asking for more detail.
+        """
         if not state["is_relevant"] and not state.get("best_context"):
+            return {"generation_mode": "clarification", "citations": []}
+
+        if not state["is_relevant"]:
+            # Retries exhausted, but an earlier attempt found something
+            # worth trying — a false-negative relevance verdict is a more
+            # forgivable failure than throwing away a real find, so give
+            # the grounded answer a real shot at it rather than jumping
+            # straight to "please clarify".
+            documents = state["best_documents"]
+            context = state["best_context"]
+        else:
+            documents = state["documents"]
+            # Reuse the context _evaluate already built for this same
+            # documents list rather than rebuilding it — evaluate always
+            # runs immediately before generation on every path.
+            context = state["prompt_context"]
+
+        citations = [
+            Citation(
+                document_id=d.document_id,
+                document_name=d.document_name,
+                web_url=d.web_url,
+                is_folder=d.is_folder,
+                folder_path=d.folder_path,
+            )
+            for d in documents
+        ]
+        return {"generation_mode": "answer", "generation_context": context, "citations": citations}
+
+    async def _prepare_generation(self, state: RAGState) -> dict:
+        return self._decide_generation(state)
+
+    async def _generate_answer(self, state: RAGState) -> dict:
+        decision = self._decide_generation(state)
+        step = self._step("compose", "Composing the answer")
+        reasoning_steps = state["reasoning_steps"] + [step]
+
+        if decision["generation_mode"] == "clarification":
             try:
                 answer = await self.llm.generate_clarification(
                     state["question"], state["previous_queries"]
@@ -315,47 +418,19 @@ class LangGraphRAGService:
                 "[generate_answer] no relevant content found, returning clarification, total_attempts=%d",
                 state["retrieval_attempts"],
             )
-            return {"answer": answer, "citations": []}
+            return {"answer": answer, "citations": [], "reasoning_steps": reasoning_steps}
 
-        if not state["is_relevant"]:
-            # Retries exhausted, but an earlier attempt found something
-            # worth trying — a false-negative relevance verdict is a
-            # more forgivable failure than throwing away a real find, so
-            # give the grounded answer a real shot at it rather than
-            # jumping straight to "please clarify".
-            documents = state["best_documents"]
-            context = state["best_context"]
-            logger.info(
-                "[generate_answer] falling back to best-attempt content "
-                "(%d document(s), %d context chars) after exhausting retries",
-                len(documents),
-                len(context),
-            )
-        else:
-            documents = state["documents"]
-            # Reuse the context _evaluate already built for this same
-            # documents list rather than rebuilding it — evaluate always
-            # runs immediately before generate_answer on every path.
-            context = state["prompt_context"]
-
-        answer = await self.llm.generate_answer(question=state["question"], context=context)
-        citations = [
-            Citation(
-                document_id=d.document_id,
-                document_name=d.document_name,
-                web_url=d.web_url,
-                is_folder=d.is_folder,
-                folder_path=d.folder_path,
-            )
-            for d in documents
-        ]
+        answer = await self.llm.generate_answer(
+            question=state["question"], context=decision["generation_context"]
+        )
+        citations = decision["citations"]
         logger.info(
             "[generate_answer] %d citation(s), answer_chars=%d, total_attempts=%d",
             len(citations),
             len(answer),
             state["retrieval_attempts"],
         )
-        return {"answer": answer, "citations": citations}
+        return {"answer": answer, "citations": citations, "reasoning_steps": reasoning_steps}
 
     # --- helpers -----------------------------------------------------------
 
@@ -433,6 +508,9 @@ class LangGraphRAGService:
             "best_context": "",
             "answer": "",
             "citations": [],
+            "reasoning_steps": [],
+            "generation_mode": "",
+            "generation_context": "",
         }
         final_state = await self.graph.ainvoke(
             initial_state, config={"recursion_limit": _RECURSION_LIMIT}
@@ -447,4 +525,100 @@ class LangGraphRAGService:
             answer=final_state["answer"],
             citations=final_state["citations"],
             retrieval_attempts=final_state["retrieval_attempts"],
+            reasoning_steps=[ReasoningStep(**s) for s in final_state["reasoning_steps"]],
         )
+
+    async def stream_answer(self, user: UserContext, question: str) -> AsyncIterator[dict]:
+        """Same pipeline as answer_question, but yields events as they
+        happen instead of returning one ChatResponse at the end:
+        {"type": "step", "step": {...}} as each pipeline stage completes,
+        {"type": "token", "text": "..."} for each answer token, and a
+        final {"type": "done", "answer": ..., "citations": [...],
+        "retrieval_attempts": ...}.
+
+        Runs self.graph_stream (identical routing to self.graph, but ends
+        right before the final LLM call — see _prepare_generation /
+        _prepare_conversational) so the actual generation can be streamed
+        here instead of awaited whole inside a graph node.
+        """
+        logger.info("=== LangGraph stream start: user=%s question=%r ===", user.upn, question)
+        initial_state: RAGState = {
+            "question": question,
+            "user": user,
+            "search_query": question,
+            "needs_retrieval": True,
+            "documents": [],
+            "is_relevant": False,
+            "prompt_context": "",
+            "retrieval_attempts": 0,
+            "max_retries": MAX_RETRIES,
+            "previous_queries": [],
+            "best_documents": [],
+            "best_context": "",
+            "answer": "",
+            "citations": [],
+            "reasoning_steps": [],
+            "generation_mode": "",
+            "generation_context": "",
+        }
+
+        final_state = initial_state
+        emitted = 0
+        async for state in self.graph_stream.astream(
+            initial_state, config={"recursion_limit": _RECURSION_LIMIT}, stream_mode="values"
+        ):
+            final_state = state
+            steps = state.get("reasoning_steps", [])
+            for step in steps[emitted:]:
+                yield {"type": "step", "step": step}
+            emitted = len(steps)
+
+        compose_step = self._step("compose", "Composing the answer")
+        yield {"type": "step", "step": compose_step}
+
+        mode = final_state.get("generation_mode")
+        full_answer = ""
+        if mode == "conversational":
+            try:
+                async for delta in self.llm.generate_conversational_reply_stream(question):
+                    full_answer += delta
+                    yield {"type": "token", "text": delta}
+            except Exception:
+                logger.warning("Conversational reply streaming failed; using fallback", exc_info=True)
+                full_answer = _FALLBACK_CHITCHAT_REPLY
+                yield {"type": "token", "text": full_answer}
+            if not full_answer:
+                full_answer = _FALLBACK_CHITCHAT_REPLY
+                yield {"type": "token", "text": full_answer}
+            citations: list[Citation] = []
+        elif mode == "clarification":
+            try:
+                async for delta in self.llm.generate_clarification_stream(
+                    question, final_state["previous_queries"]
+                ):
+                    full_answer += delta
+                    yield {"type": "token", "text": delta}
+            except Exception:
+                logger.warning("Clarification streaming failed; using fallback", exc_info=True)
+            if not full_answer:
+                full_answer = _FALLBACK_CLARIFICATION_REPLY
+                yield {"type": "token", "text": full_answer}
+            citations = []
+        else:
+            context = final_state.get("generation_context", "")
+            async for delta in self.llm.generate_answer_stream(question, context):
+                full_answer += delta
+                yield {"type": "token", "text": delta}
+            citations = final_state.get("citations", [])
+
+        logger.info(
+            "=== LangGraph stream end: attempts=%d citations=%d ===",
+            final_state["retrieval_attempts"],
+            len(citations),
+        )
+        yield {
+            "type": "done",
+            "answer": full_answer,
+            "citations": [c.model_dump() for c in citations],
+            "retrieval_attempts": final_state["retrieval_attempts"],
+        }

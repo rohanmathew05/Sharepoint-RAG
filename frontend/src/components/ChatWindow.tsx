@@ -1,9 +1,8 @@
 import { FormEvent, useState } from "react";
 import { ArrowUp } from "lucide-react";
 import type { ChatMessage, Citation } from "../types";
-import { ApiError, SessionExpiredError, sendChatMessage } from "../api/client";
+import { ApiError, SessionExpiredError, streamChatMessage } from "../api/client";
 import { MessageBubble } from "./MessageBubble";
-import { LoadingIndicator } from "./LoadingIndicator";
 import { SourcesPanel } from "./SourcesPanel";
 
 export function ChatWindow({
@@ -29,34 +28,63 @@ export function ChatWindow({
 
     const userMessage: ChatMessage = { role: "user", content: question };
     const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    // The assistant's reply streams into this same message object as
+    // events arrive — reasoning steps append to reasoningSteps, answer
+    // tokens append to content — rather than only appearing once
+    // everything is done.
+    const assistantIndex = nextMessages.length;
+    setMessages([...nextMessages, { role: "assistant", content: "", reasoningSteps: [], isStreaming: true }]);
     setInput("");
     setIsLoading(true);
 
+    function updateAssistant(update: (m: ChatMessage) => ChatMessage) {
+      setMessages((prev) => {
+        const next = [...prev];
+        next[assistantIndex] = update(next[assistantIndex]);
+        return next;
+      });
+    }
+
     try {
-      const response = await sendChatMessage(question, nextMessages, getToken);
-      setMessages([
-        ...nextMessages,
-        {
-          role: "assistant",
-          content: response.answer,
-          citations: response.citations,
-          retrievalAttempts: response.retrieval_attempts,
-        },
-      ]);
+      await streamChatMessage(question, nextMessages, getToken, (event) => {
+        if (event.type === "step") {
+          updateAssistant((m) => ({
+            ...m,
+            reasoningSteps: [...(m.reasoningSteps ?? []), event.step],
+          }));
+        } else if (event.type === "token") {
+          updateAssistant((m) => ({ ...m, content: m.content + event.text }));
+        } else if (event.type === "done") {
+          updateAssistant((m) => ({
+            ...m,
+            content: event.answer,
+            citations: event.citations,
+            isStreaming: false,
+          }));
+        } else if (event.type === "error") {
+          if (event.error_code === "obo_token_expired" && onSessionExpired) {
+            onSessionExpired();
+            // Drop the pending exchange rather than leaving a broken
+            // streaming bubble in history — it never actually finished.
+            setMessages(messages);
+          } else {
+            updateAssistant((m) => ({
+              ...m,
+              content: event.detail,
+              isError: true,
+              isStreaming: false,
+            }));
+          }
+        }
+      });
     } catch (err) {
       if (err instanceof SessionExpiredError && onSessionExpired) {
         onSessionExpired();
-        // Drop the pending user message rather than leaving it sitting
-        // in history unanswered — it never actually reached the model.
         setMessages(messages);
-        return;
+      } else {
+        const detail = err instanceof ApiError ? err.message : "Something went wrong. Please try again.";
+        updateAssistant((m) => ({ ...m, content: detail, isError: true, isStreaming: false }));
       }
-      const detail = err instanceof ApiError ? err.message : "Something went wrong. Please try again.";
-      setMessages([
-        ...nextMessages,
-        { role: "assistant", content: detail, isError: true },
-      ]);
     } finally {
       setIsLoading(false);
     }
@@ -76,7 +104,6 @@ export function ChatWindow({
           {messages.map((m, i) => (
             <MessageBubble key={i} message={m} onOpenSources={setOpenSourcesFor} />
           ))}
-          {isLoading && <LoadingIndicator />}
         </div>
       </div>
       <form
