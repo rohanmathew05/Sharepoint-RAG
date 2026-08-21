@@ -24,6 +24,10 @@ async function authHeaders(getToken: () => Promise<string>) {
   };
 }
 
+// Always routes through the LangGraph pipeline (query rewriting +
+// retrieval evaluation + intent classification) — see docs/LANGGRAPH.md.
+const CHAT_ENDPOINT = `${API_BASE}/chat/v2`;
+
 export async function sendChatMessage(
   question: string,
   history: ChatMessage[],
@@ -36,7 +40,7 @@ export async function sendChatMessage(
 
   const attempt = async () => {
     const headers = await authHeaders(getToken);
-    return fetch(`${API_BASE}/chat`, { method: "POST", headers, body });
+    return fetch(CHAT_ENDPOINT, { method: "POST", headers, body });
   };
 
   let res = await attempt();

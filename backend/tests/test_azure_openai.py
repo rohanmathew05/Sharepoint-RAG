@@ -5,16 +5,31 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.services.azure_openai import SYSTEM_PROMPT, AzureOpenAIService
+from backend.services.azure_openai import (
+    SYSTEM_PROMPT,
+    AzureOpenAIService,
+    IntentClassification,
+    RelevanceEvaluation,
+)
 
 
 class FakeAzureClient:
-    def __init__(self, chat_content: str = "answer", embedding: list[float] | None = None):
+    def __init__(
+        self,
+        chat_content: str = "answer",
+        embedding: list[float] | None = None,
+        parsed=None,
+    ):
         self.last_chat_kwargs: dict | None = None
+        self.last_parse_kwargs: dict | None = None
         self._chat_content = chat_content
         self._embedding = embedding or [0.1, 0.2, 0.3]
+        self._parsed = parsed
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat))
         self.embeddings = SimpleNamespace(create=self._create_embedding)
+        self.beta = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(parse=self._parse_chat))
+        )
 
     async def _create_chat(self, **kwargs):
         self.last_chat_kwargs = kwargs
@@ -23,6 +38,11 @@ class FakeAzureClient:
 
     async def _create_embedding(self, **kwargs):
         return SimpleNamespace(data=[SimpleNamespace(embedding=self._embedding)])
+
+    async def _parse_chat(self, **kwargs):
+        self.last_parse_kwargs = kwargs
+        message = SimpleNamespace(parsed=self._parsed)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 @pytest.mark.asyncio
@@ -61,3 +81,87 @@ async def test_embed_returns_the_embedding_vector(monkeypatch):
 
     vector = await service.embed("some text")
     assert vector == [0.5, 0.6, 0.7]
+
+
+@pytest.mark.asyncio
+async def test_classify_needs_retrieval_true_for_search_verdict(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(parsed=IntentClassification(needs_retrieval=True))
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    assert await service.classify_needs_retrieval("What PPE is required?") is True
+    assert fake_client.last_parse_kwargs["temperature"] == 0
+    assert fake_client.last_parse_kwargs["response_format"] is IntentClassification
+
+
+@pytest.mark.asyncio
+async def test_classify_needs_retrieval_false_for_chitchat_verdict(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(parsed=IntentClassification(needs_retrieval=False))
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    assert await service.classify_needs_retrieval("hello") is False
+
+
+@pytest.mark.asyncio
+async def test_evaluate_relevance_skips_api_call_for_empty_context(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(parsed=RelevanceEvaluation(is_relevant=True))
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    result = await service.evaluate_relevance("question", "")
+    assert result is False
+    assert fake_client.last_parse_kwargs is None  # never called the API
+
+
+@pytest.mark.asyncio
+async def test_evaluate_relevance_true_for_relevant_verdict(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(parsed=RelevanceEvaluation(is_relevant=True))
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    result = await service.evaluate_relevance("What is the GIS ID?", "[doc] some excerpt")
+    assert result is True
+    assert fake_client.last_parse_kwargs["response_format"] is RelevanceEvaluation
+
+
+@pytest.mark.asyncio
+async def test_evaluate_relevance_false_for_not_relevant_verdict(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(parsed=RelevanceEvaluation(is_relevant=False))
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    result = await service.evaluate_relevance("What is the GIS ID?", "[doc] unrelated excerpt")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_generate_conversational_reply_calls_the_llm(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(chat_content="Hey! Ask me about the SharePoint docs anytime.")
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    reply = await service.generate_conversational_reply("good morning!")
+
+    assert reply == "Hey! Ask me about the SharePoint docs anytime."
+    messages = fake_client.last_chat_kwargs["messages"]
+    assert messages[1] == {"role": "user", "content": "good morning!"}
+
+
+@pytest.mark.asyncio
+async def test_generate_clarification_includes_attempted_queries(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(
+        chat_content="I couldn't find that — could you share a reference number?"
+    )
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    reply = await service.generate_clarification(
+        "what is the wfv number for tullylost",
+        ["tullylost", "wfv number tullylost"],
+    )
+
+    assert reply == "I couldn't find that — could you share a reference number?"
+    user_content = fake_client.last_chat_kwargs["messages"][1]["content"]
+    assert "tullylost" in user_content
+    assert "wfv number tullylost" in user_content

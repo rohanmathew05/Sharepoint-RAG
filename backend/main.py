@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.api import auth, chat, search
+from backend.api import auth, chat, chat_v2, search
 from backend.auth.obo import OBOExchangeError, OBOTokenExpiredError
 from backend.core.config import get_settings
 from backend.services.graph import GraphAPIError
@@ -43,6 +43,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(chat.router)
+app.include_router(chat_v2.router)
 app.include_router(search.router)
 
 
