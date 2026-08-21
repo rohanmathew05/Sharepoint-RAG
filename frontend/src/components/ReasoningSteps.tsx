@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Search, ListChecks, Sparkles, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ReasoningStep as ReasoningStepData } from "../types";
@@ -28,6 +28,16 @@ export function ReasoningSteps({ steps, live }: { steps: ReasoningStepData[]; li
   // visible as it happens rather than hidden behind an extra click —
   // collapsible afterwards the same as any other message.
   const [open, setOpen] = useState(Boolean(live));
+  // Auto-collapse the instant streaming finishes (the live -> not-live
+  // edge), rather than staying open forever once opened — a manual
+  // toggle mid-stream still works right up to that transition.
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (wasLive.current && !live) {
+      setOpen(false);
+    }
+    wasLive.current = live;
+  }, [live]);
 
   if (steps.length === 0) return null;
 
