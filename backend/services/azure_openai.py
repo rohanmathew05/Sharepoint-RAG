@@ -45,6 +45,29 @@ CONVERSATIONAL_SYSTEM_PROMPT = (
     "documents. Sound like a helpful colleague, not a scripted bot."
 )
 
+ENTITY_EXTRACTOR_SYSTEM_PROMPT = (
+    "You decide whether a user's message is asking to compare two or more "
+    "distinct named things (e.g. sites, documents, projects, people) "
+    "against each other. If so, list each thing being compared as a short "
+    "search phrase — its name only, not the comparison verb or connecting "
+    "words (e.g. for \"compare neilstown and ronanstown\" the entities are "
+    "\"neilstown\" and \"ronanstown\"). If the message is not a comparison "
+    "between multiple named things, return is_comparison=false and an "
+    "empty entities list."
+)
+
+COMPARISON_SYSTEM_PROMPT = (
+    "You are an internal company AI assistant. The user asked a question "
+    "comparing multiple named items. The context below is organized into "
+    "labeled sections, one per item, built ONLY from the provided "
+    "SharePoint document excerpts. If a section says no documents were "
+    "found for that item, say so plainly in your answer — do not guess "
+    "at its contents, and do not silently leave it out of the comparison. "
+    "Compare the items using only what each section actually contains. "
+    "Do not invent facts, and do not reference documents that are not "
+    "listed in the context, even if you believe they exist."
+)
+
 CLARIFICATION_SYSTEM_PROMPT = (
     "A user asked a question about internal company SharePoint documents. "
     "Several different searches were tried and none of them found a "
@@ -66,6 +89,11 @@ class IntentClassification(BaseModel):
 
 class RelevanceEvaluation(BaseModel):
     is_relevant: bool
+
+
+class EntityExtraction(BaseModel):
+    is_comparison: bool
+    entities: list[str]
 
 
 class AzureOpenAIService:
@@ -96,6 +124,34 @@ class AzureOpenAIService:
             temperature=0.2,
         )
         return response.choices[0].message.content or ""
+
+    async def generate_comparison_answer(self, question: str, context: str) -> str:
+        client = self._get_client()
+        response = await client.chat.completions.create(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {question}",
+                },
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or ""
+
+    def generate_comparison_answer_stream(self, question: str, context: str) -> AsyncIterator[str]:
+        return self._stream_deltas(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {question}",
+                },
+            ],
+            temperature=0.2,
+        )
 
     async def _stream_deltas(self, **create_kwargs) -> AsyncIterator[str]:
         client = self._get_client()
@@ -210,6 +266,29 @@ class AzureOpenAIService:
             response_format=IntentClassification,
         )
         return response.choices[0].message.parsed.needs_retrieval
+
+    async def classify_entities(self, question: str) -> EntityExtraction:
+        """Does this question compare two or more distinct named things,
+        and if so, what are they? Only called when a cheap string
+        pre-filter already suspects comparison phrasing (see
+        LangGraphRAGService._analyze_query), so this cost is never paid
+        on the common single-topic question.
+
+        Callers should treat any exception as "not a comparison" — a
+        classifier hiccup should just fall back to today's single-search
+        behavior, never break the pipeline.
+        """
+        client = self._get_client()
+        response = await client.beta.chat.completions.parse(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": ENTITY_EXTRACTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            temperature=0,
+            response_format=EntityExtraction,
+        )
+        return response.choices[0].message.parsed
 
     async def evaluate_relevance(self, question: str, context: str) -> bool:
         """Does the retrieved context actually contain enough to answer

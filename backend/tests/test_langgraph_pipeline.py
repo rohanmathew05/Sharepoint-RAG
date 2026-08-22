@@ -7,6 +7,7 @@ application-level ACL logic left in this codebase to test."""
 import pytest
 
 from backend.models.auth import UserContext
+from backend.services.azure_openai import EntityExtraction
 from backend.services.langgraph_pipeline import LangGraphRAGService, _is_chitchat
 
 USER_A = UserContext(
@@ -475,3 +476,241 @@ async def test_delegated_token_search_is_the_only_permission_boundary(monkeypatc
 
     assert len(received_users) >= 1
     assert all(u is USER_A for u in received_users)
+
+
+# --- comparison ("compare X and Y") handling ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_single_topic_question_never_calls_entity_classification(monkeypatch):
+    """The cheap string pre-filter should keep classify_entities from
+    ever being called on an ordinary single-topic question — no added
+    LLM call, no regression in cost/latency for the common case."""
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fail_if_called(question: str):
+        raise AssertionError("classify_entities should not be called for a non-comparison question")
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    async def fake_clarification(question, attempted_queries):
+        return "Could you share a document name or reference number?"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fail_if_called)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+
+    response = await service.answer_question(USER_A, "What PPE is required for confined space work?")
+    assert response.retrieval_attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_comparison_question_searches_each_entity_and_merges_results(monkeypatch):
+    """Reproduces the reported bug: "compare neilstown and ronanstown"
+    are two separate documents that a single blended search often can't
+    surface together. Each entity should get its own search, and both
+    documents should end up in the merged context/citations."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    neilstown_doc = SourceDocument(
+        document_id="doc-neilstown",
+        document_name="NEILSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/neilstown.xlsx",
+        relevant_content="Site Name NEILSTOWN, GIS ID N-1.",
+    )
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["neilstown", "ronanstown"])
+
+    search_calls: list[str] = []
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        if "neilstown" in query.lower():
+            return [neilstown_doc]
+        if "ronanstown" in query.lower():
+            return [ronanstown_doc]
+        return []
+
+    async def fake_evaluate_relevance(question, context):
+        return bool(context.strip())
+
+    async def fake_comparison_answer(question, context):
+        assert "neilstown" in context.lower() and "ronanstown" in context.lower()
+        return "Neilstown is N-1 and Ronanstown is R-2."
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("the single-topic generate_answer should not be used for a comparison")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+    monkeypatch.setattr(service.llm, "generate_answer", fail_if_called)
+
+    response = await service.answer_question(USER_A, "compare neilstown and ronanstown")
+
+    assert search_calls == ["neilstown", "ronanstown"]
+    assert response.answer == "Neilstown is N-1 and Ronanstown is R-2."
+    document_names = {c.document_name for c in response.citations}
+    assert document_names == {"NEILSTOWN.xlsx", "RONANSTOWN.xlsx"}
+
+
+@pytest.mark.asyncio
+async def test_comparison_with_one_entity_not_found_still_answers_for_the_other(monkeypatch):
+    """If a search for one entity comes back empty while another
+    succeeds, that entity should not be silently dropped — the merged
+    context should explicitly note nothing was found for it, and the
+    other entity's result should still make it through to the answer."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["cliffield", "ronanstown"])
+
+    async def fake_search(user, query, max_results=8):
+        if "ronanstown" in query.lower():
+            return [ronanstown_doc]
+        return []  # cliffield is never found, even after a rewrite
+
+    async def fake_evaluate_relevance(question, context):
+        return bool(context.strip())
+
+    async def fake_rewrite(original_question, previous_queries):
+        return f"{previous_queries[-1]} site"
+
+    captured_context = {}
+
+    async def fake_comparison_answer(question, context):
+        captured_context["context"] = context
+        return "I found information on ronanstown but nothing on cliffield."
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    response = await service.answer_question(USER_A, "compare cliffield and ronanstown")
+
+    assert 'No documents found for "cliffield"' in captured_context["context"]
+    assert "RONANSTOWN" in captured_context["context"]
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "RONANSTOWN.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_three_entity_comparison_generalizes(monkeypatch):
+    """The comparison path shouldn't hardcode two entities — three (or
+    more) named things should each get their own search and section."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    docs = {
+        "neilstown": SourceDocument(
+            document_id="doc-1", document_name="NEILSTOWN.xlsx",
+            web_url="https://contoso.sharepoint.com/n.xlsx", relevant_content="N info",
+        ),
+        "ronanstown": SourceDocument(
+            document_id="doc-2", document_name="RONANSTOWN.xlsx",
+            web_url="https://contoso.sharepoint.com/r.xlsx", relevant_content="R info",
+        ),
+        "cliffield": SourceDocument(
+            document_id="doc-3", document_name="CLIFFIELD.xlsx",
+            web_url="https://contoso.sharepoint.com/c.xlsx", relevant_content="C info",
+        ),
+    }
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["neilstown", "ronanstown", "cliffield"])
+
+    search_calls: list[str] = []
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        return [docs[query.lower()]] if query.lower() in docs else []
+
+    async def fake_evaluate_relevance(question, context):
+        return bool(context.strip())
+
+    async def fake_comparison_answer(question, context):
+        return "compared all three"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    response = await service.answer_question(USER_A, "compare neilstown, ronanstown and cliffield")
+
+    assert set(search_calls) == {"neilstown", "ronanstown", "cliffield"}
+    assert len(response.citations) == 3
+
+
+@pytest.mark.asyncio
+async def test_entity_classification_failure_falls_back_to_single_search(monkeypatch):
+    """A classify_entities hiccup should regress to today's single-search
+    behavior, never break the pipeline."""
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def broken_classify_entities(question: str):
+        raise RuntimeError("Azure OpenAI had a bad day")
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    async def fake_clarification(question, attempted_queries):
+        return "Could you share a document name or reference number?"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", broken_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+
+    response = await service.answer_question(USER_A, "compare neilstown and ronanstown")
+    assert response.retrieval_attempts >= 1

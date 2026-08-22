@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str = "http://localhost:5173"
     MAX_SEARCH_RESULTS: int = 8
     MAX_RAG_CONTEXT_CHARS: int = 12000
+    # Comparison questions ("compare X and Y") search each entity
+    # independently; this caps retries *per entity* so an N-entity
+    # comparison can't balloon to N * MAX_RETRIES sequential Graph calls.
+    MAX_RETRIES_PER_ENTITY: int = 2
 
 
 @lru_cache

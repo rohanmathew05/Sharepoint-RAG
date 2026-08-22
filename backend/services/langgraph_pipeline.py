@@ -103,6 +103,21 @@ def _is_chitchat(question: str) -> bool:
     return normalized in _CHITCHAT_MESSAGES
 
 
+# Cheap pre-filter so classify_entities (a real LLM call) is only ever
+# paid for on questions that already look like they might be comparing
+# multiple things — the common single-topic question never triggers it.
+_COMPARISON_HINTS = (
+    "compare", "comparing", "comparison", " vs ", " vs.", " versus ",
+    "difference between", "differences between", "differ from",
+    " or ", " and ",
+)
+
+
+def _looks_like_comparison(question: str) -> bool:
+    normalized = f" {question.strip().lower()} "
+    return any(hint in normalized for hint in _COMPARISON_HINTS)
+
+
 class RAGState(TypedDict):
     question: str
     user: UserContext
@@ -140,6 +155,19 @@ class RAGState(TypedDict):
     # re-derive it from is_relevant/best_context itself.
     generation_mode: str
     generation_context: str
+    # Set by _analyze_query: whether this question is asking to compare
+    # two or more distinct named things, and if so what they are. When
+    # True, the graph routes to _compare_search instead of the normal
+    # single-query search/evaluate/rewrite loop.
+    is_comparison: bool
+    entities: list[str]
+    # Per-entity search results/misses from _compare_search, kept
+    # separate from `documents` (which holds the flat merged/deduped
+    # list for citations) so _build_comparison_context can label each
+    # entity's own section — including an explicit "not found" note for
+    # an entity with zero results, instead of silently dropping it.
+    entity_documents: dict[str, list[SourceDocument]]
+    entity_found: dict[str, bool]
 
 
 class LangGraphRAGService:
@@ -169,6 +197,7 @@ class LangGraphRAGService:
         graph.add_node("search", self._search)
         graph.add_node("evaluate", self._evaluate)
         graph.add_node("rewrite_query", self._rewrite_query)
+        graph.add_node("compare_search", self._compare_search)
         if streaming:
             graph.add_node("answer_conversationally", self._prepare_conversational)
             graph.add_node("generate_answer", self._prepare_generation)
@@ -181,7 +210,7 @@ class LangGraphRAGService:
         graph.add_conditional_edges(
             "classify_intent",
             self._route_after_classify,
-            {"search": "search", "skip": "answer_conversationally"},
+            {"search": "search", "compare": "compare_search", "skip": "answer_conversationally"},
         )
         graph.add_edge("search", "evaluate")
         graph.add_conditional_edges(
@@ -190,6 +219,7 @@ class LangGraphRAGService:
             {"generate": "generate_answer", "rewrite": "rewrite_query"},
         )
         graph.add_edge("rewrite_query", "search")
+        graph.add_edge("compare_search", "generate_answer")
         graph.add_edge("generate_answer", END)
         graph.add_edge("answer_conversationally", END)
 
@@ -202,11 +232,27 @@ class LangGraphRAGService:
         return {"kind": kind, "label": label, "detail": detail}
 
     async def _analyze_query(self, state: RAGState) -> dict:
-        logger.info("[analyze_query] question=%r", state["question"])
+        question = state["question"]
+        logger.info("[analyze_query] question=%r", question)
         step = self._step("understand", "Understanding the question")
+
+        is_comparison = False
+        entities: list[str] = []
+        if _looks_like_comparison(question):
+            try:
+                extraction = await self.llm.classify_entities(question)
+                if extraction.is_comparison and len(extraction.entities) >= 2:
+                    is_comparison = True
+                    entities = extraction.entities
+            except Exception:
+                logger.warning("Entity classification failed; falling back to single search", exc_info=True)
+        logger.info("[analyze_query] is_comparison=%s entities=%s", is_comparison, entities)
+
         return {
-            "search_query": state["question"].strip(),
+            "search_query": question.strip(),
             "retrieval_attempts": 0,
+            "is_comparison": is_comparison,
+            "entities": entities,
             "reasoning_steps": state["reasoning_steps"] + [step],
         }
 
@@ -232,7 +278,12 @@ class LangGraphRAGService:
         return {"needs_retrieval": needs_retrieval}
 
     def _route_after_classify(self, state: RAGState) -> str:
-        route = "search" if state["needs_retrieval"] else "skip"
+        if not state["needs_retrieval"]:
+            route = "skip"
+        elif state.get("is_comparison"):
+            route = "compare"
+        else:
+            route = "search"
         logger.info("[route_after_classify] -> %s", route)
         return route
 
@@ -350,6 +401,112 @@ class LangGraphRAGService:
         logger.info("[rewrite_query] %r -> %r", state["search_query"], rewritten)
         return {"search_query": rewritten}
 
+    async def _compare_search(self, state: RAGState) -> dict:
+        # A comparison question ("compare X and Y") is really N
+        # independent lookups, not one blended search — a single Graph
+        # query for the combined text often can't surface unrelated
+        # documents in the same top-K result set. So each entity gets
+        # its own bounded search+evaluate+rewrite loop here, and the
+        # results are merged (never overwritten) into one context
+        # labeled per entity, including an explicit note when an
+        # entity's search comes back empty.
+        entities = state["entities"]
+        n = max(len(entities), 1)
+        per_entity_results = max(self.settings.MAX_SEARCH_RESULTS // n, 1)
+
+        entity_documents: dict[str, list[SourceDocument]] = {}
+        entity_found: dict[str, bool] = {}
+        reasoning_steps = list(state["reasoning_steps"])
+        previous_queries = list(state["previous_queries"])
+        total_attempts = 0
+
+        for entity in entities:
+            query = entity
+            tried: list[str] = []
+            docs: list[SourceDocument] = []
+            for attempt in range(1, self.settings.MAX_RETRIES_PER_ENTITY + 1):
+                docs = await self.sharepoint.search(
+                    state["user"], query, max_results=per_entity_results
+                )
+                tried.append(query)
+                previous_queries.append(query)
+                total_attempts += 1
+                relevant = False
+                if docs:
+                    context = self._build_context(docs)
+                    try:
+                        relevant = await self.llm.evaluate_relevance(
+                            f"{state['question']} (specifically regarding {entity})", context
+                        )
+                    except Exception:
+                        logger.warning("Relevance evaluation failed during comparison search; defaulting to relevant", exc_info=True)
+                        relevant = True
+                if relevant:
+                    break
+                if attempt < self.settings.MAX_RETRIES_PER_ENTITY:
+                    query = await self._llm_rewrite_query(entity, tried)
+
+            entity_documents[entity] = docs
+            entity_found[entity] = bool(docs)
+            reasoning_steps.append(self._step(
+                "search",
+                f'Searching for "{entity}"',
+                f"Found {len(docs)} document(s)." if docs else f'No documents found for "{entity}".',
+            ))
+            logger.info(
+                "[compare_search] entity=%r found=%d query=%r", entity, len(docs), query
+            )
+
+        merged_documents = self._merge_and_dedupe(entity_documents)
+        context = self._build_comparison_context(entity_documents, entity_found)
+
+        return {
+            "entity_documents": entity_documents,
+            "entity_found": entity_found,
+            "documents": merged_documents,
+            "prompt_context": context,
+            "best_documents": merged_documents,
+            "best_context": context,
+            "is_relevant": any(entity_found.values()),
+            "retrieval_attempts": state["retrieval_attempts"] + total_attempts,
+            "previous_queries": previous_queries,
+            "reasoning_steps": reasoning_steps,
+        }
+
+    @staticmethod
+    def _merge_and_dedupe(entity_documents: dict[str, list[SourceDocument]]) -> list[SourceDocument]:
+        seen_ids: set[str] = set()
+        merged: list[SourceDocument] = []
+        for docs in entity_documents.values():
+            for doc in docs:
+                if doc.document_id in seen_ids:
+                    continue
+                seen_ids.add(doc.document_id)
+                merged.append(doc)
+        return merged
+
+    def _build_comparison_context(
+        self, entity_documents: dict[str, list[SourceDocument]], entity_found: dict[str, bool]
+    ) -> str:
+        n = max(len(entity_documents), 1)
+        per_entity_budget = self.settings.MAX_RAG_CONTEXT_CHARS // n
+
+        sections = []
+        for entity, docs in entity_documents.items():
+            if not entity_found.get(entity):
+                sections.append(f'=== {entity} ===\n(No documents found for "{entity}".)')
+                continue
+            parts = []
+            total_chars = 0
+            for doc in docs:
+                block = f"[{doc.document_name}]\n{doc.relevant_content}"
+                if total_chars + len(block) > per_entity_budget:
+                    break
+                parts.append(block)
+                total_chars += len(block)
+            sections.append(f"=== {entity} ===\n" + "\n\n".join(parts))
+        return "\n\n".join(sections)
+
     def _decide_generation(self, state: RAGState) -> dict:
         """Pure decision logic shared by the non-streaming _generate_answer
         node and the streaming graph's _prepare_generation node: which mode
@@ -395,7 +552,12 @@ class LangGraphRAGService:
             )
             for d in documents
         ]
-        return {"generation_mode": "answer", "generation_context": context, "citations": citations}
+        return {
+            "generation_mode": "answer",
+            "generation_context": context,
+            "citations": citations,
+            "is_comparison": state.get("is_comparison", False),
+        }
 
     async def _prepare_generation(self, state: RAGState) -> dict:
         return self._decide_generation(state)
@@ -420,9 +582,14 @@ class LangGraphRAGService:
             )
             return {"answer": answer, "citations": [], "reasoning_steps": reasoning_steps}
 
-        answer = await self.llm.generate_answer(
-            question=state["question"], context=decision["generation_context"]
-        )
+        if decision["is_comparison"]:
+            answer = await self.llm.generate_comparison_answer(
+                question=state["question"], context=decision["generation_context"]
+            )
+        else:
+            answer = await self.llm.generate_answer(
+                question=state["question"], context=decision["generation_context"]
+            )
         citations = decision["citations"]
         logger.info(
             "[generate_answer] %d citation(s), answer_chars=%d, total_attempts=%d",
@@ -511,6 +678,10 @@ class LangGraphRAGService:
             "reasoning_steps": [],
             "generation_mode": "",
             "generation_context": "",
+            "is_comparison": False,
+            "entities": [],
+            "entity_documents": {},
+            "entity_found": {},
         }
         final_state = await self.graph.ainvoke(
             initial_state, config={"recursion_limit": _RECURSION_LIMIT}
@@ -560,6 +731,10 @@ class LangGraphRAGService:
             "reasoning_steps": [],
             "generation_mode": "",
             "generation_context": "",
+            "is_comparison": False,
+            "entities": [],
+            "entity_documents": {},
+            "entity_found": {},
         }
 
         final_state = initial_state
@@ -606,7 +781,12 @@ class LangGraphRAGService:
             citations = []
         else:
             context = final_state.get("generation_context", "")
-            async for delta in self.llm.generate_answer_stream(question, context):
+            stream = (
+                self.llm.generate_comparison_answer_stream(question, context)
+                if final_state.get("is_comparison")
+                else self.llm.generate_answer_stream(question, context)
+            )
+            async for delta in stream:
                 full_answer += delta
                 yield {"type": "token", "text": delta}
             citations = final_state.get("citations", [])
