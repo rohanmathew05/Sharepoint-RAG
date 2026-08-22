@@ -26,7 +26,7 @@ export function FileTypeIcon({
 }) {
   if (isFolder) {
     return (
-      <span className="source-icon-emoji" role="img" aria-label="Folder">
+      <span className="shrink-0 text-base leading-none" role="img" aria-label="Folder">
         📁
       </span>
     );
@@ -35,7 +35,7 @@ export function FileTypeIcon({
   const icon = OFFICE_ICONS[getExtension(documentName)];
   if (!icon) {
     return (
-      <span className="source-icon-emoji" role="img" aria-label="Document">
+      <span className="shrink-0 text-base leading-none" role="img" aria-label="Document">
         📄
       </span>
     );
@@ -43,7 +43,7 @@ export function FileTypeIcon({
 
   return (
     <svg
-      className="source-icon-badge"
+      className="mt-px shrink-0"
       width="20"
       height="20"
       viewBox="0 0 20 20"

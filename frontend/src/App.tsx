@@ -31,31 +31,38 @@ function AuthenticatedApp() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <h1>AI Assistant</h1>
-        <div className="header-right">
-          <span className="user-name">
+    <div className="flex h-screen flex-col bg-background">
+      <header className="flex items-center justify-between border-b border-border bg-surface px-6 py-3">
+        <h1 className="m-0 text-lg font-semibold text-foreground">AI Assistant</h1>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-foreground">
             {accounts[0]?.name}
             {accounts[0]?.username && (
-              <span className="user-email"> ({accounts[0].username})</span>
+              <span className="ml-1 font-normal text-muted-foreground">
+                ({accounts[0].username})
+              </span>
             )}
           </span>
-          <button className="signout-btn" onClick={() => instance.logoutRedirect()}>
+          <button
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover"
+            onClick={() => instance.logoutRedirect()}
+          >
             Sign out
           </button>
         </div>
       </header>
-      <main className="app-main">
+      <main className="flex-1 overflow-hidden">
         <ChatWindow getToken={getToken} onSessionExpired={() => setSessionExpired(true)} />
       </main>
       {sessionExpired && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h2>Session expired</h2>
-            <p>Your session has ended. Please sign in again to keep chatting.</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="max-w-sm rounded-lg bg-surface p-7 text-center shadow-xl">
+            <h2 className="m-0 mb-2 text-lg font-semibold text-foreground">Session expired</h2>
+            <p className="m-0 mb-5 text-sm text-muted-foreground">
+              Your session has ended. Please sign in again to keep chatting.
+            </p>
             <button
-              className="login-btn"
+              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover"
               onClick={() => instance.loginRedirect({ ...loginRequest, account: accounts[0] })}
             >
               Sign in with Microsoft
@@ -77,11 +84,13 @@ function LoginScreen() {
   useEffect(() => subscribeAuthError(setAuthError), []);
 
   return (
-    <div className="login-screen">
-      <h1>SharePoint AI Assistant</h1>
-      <p>Sign in with your Microsoft work account to get started.</p>
+    <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background text-center">
+      <h1 className="m-0 text-xl font-semibold text-foreground">SharePoint AI Assistant</h1>
+      <p className="m-0 text-sm text-muted-foreground">
+        Sign in with your Microsoft work account to get started.
+      </p>
       {authError && (
-        <p className="auth-error">
+        <p className="m-0 max-w-md rounded-md bg-destructive/10 px-4 py-3 text-sm leading-relaxed text-destructive">
           Sign-in failed: {authError}
           <br />
           Common causes: admin consent not granted for the app's exposed
@@ -90,7 +99,7 @@ function LoginScreen() {
         </p>
       )}
       <button
-        className="login-btn"
+        className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover"
         onClick={() => {
           clearAuthError();
           instance.loginRedirect(loginRequest);

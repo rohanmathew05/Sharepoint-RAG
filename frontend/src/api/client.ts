@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatResponse } from "../types";
+import type { ChatMessage, ChatStreamEvent } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
@@ -26,13 +26,17 @@ async function authHeaders(getToken: () => Promise<string>) {
 
 // Always routes through the LangGraph pipeline (query rewriting +
 // retrieval evaluation + intent classification) — see docs/LANGGRAPH.md.
-const CHAT_ENDPOINT = `${API_BASE}/chat/v2`;
+const CHAT_STREAM_ENDPOINT = `${API_BASE}/chat/v2/stream`;
 
-export async function sendChatMessage(
+// The stream endpoint sends newline-delimited JSON, not SSE — EventSource
+// can't carry the Authorization header this API requires, so this reads
+// the fetch() response body as a stream and parses it by hand instead.
+export async function streamChatMessage(
   question: string,
   history: ChatMessage[],
-  getToken: () => Promise<string>
-): Promise<ChatResponse> {
+  getToken: () => Promise<string>,
+  onEvent: (event: ChatStreamEvent) => void
+): Promise<void> {
   const body = JSON.stringify({
     question,
     conversation_history: history.map((m) => ({ role: m.role, content: m.content })),
@@ -40,16 +44,17 @@ export async function sendChatMessage(
 
   const attempt = async () => {
     const headers = await authHeaders(getToken);
-    return fetch(CHAT_ENDPOINT, { method: "POST", headers, body });
+    return fetch(CHAT_STREAM_ENDPOINT, { method: "POST", headers, body });
   };
 
   let res = await attempt();
 
-  // A 401 mid-session means the backend's cached On-Behalf-Of Graph token
-  // (or the frontend's own access token) has expired. getToken() forces
-  // MSAL to silently re-acquire a fresh token (or redirect to sign-in if
-  // that's no longer possible — see App.tsx) — retry exactly once with
-  // whatever it returns rather than surfacing a confusing error.
+  // Same terminal-401 retry as sendChatMessage: this only fires before
+  // any streaming has begun (a stale frontend access token, rejected by
+  // the auth dependency before the endpoint body runs) — a mid-stream
+  // session expiry surfaces as an in-band {"type": "error"} event instead
+  // (see backend/api/chat_v2.py), since the HTTP status is already
+  // committed to 200 by the time that can happen.
   if (res.status === 401) {
     res = await attempt();
   }
@@ -63,5 +68,27 @@ export async function sendChatMessage(
     throw new ApiError(message, errorBody.error_code);
   }
 
-  return res.json();
+  if (!res.body) {
+    throw new ApiError("Streaming is not supported in this browser.");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) onEvent(JSON.parse(line) as ChatStreamEvent);
+    }
+  }
+
+  const rest = buffer.trim();
+  if (rest) onEvent(JSON.parse(rest) as ChatStreamEvent);
 }

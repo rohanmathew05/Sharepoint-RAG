@@ -1,0 +1,69 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root {
+  --background: #f7f8f9;
+  --foreground: #1b2430;
+
+  --surface: #ffffff;
+  --surface-foreground: #1b2430;
+
+  --surface-alt: #eef1f2;
+
+  --muted: #eef1f2;
+  --muted-foreground: #5b6672;
+
+  --border: #dde2e6;
+  --input: #dde2e6;
+  --ring: #0f8a8a;
+
+  --primary: #0f8a8a;
+  --primary-hover: #0c7272;
+  --primary-foreground: #ffffff;
+
+  --accent-soft: #e3f4f2;
+
+  --destructive: #c4314b;
+  --destructive-foreground: #ffffff;
+
+  --radius: 0.625rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-foreground: var(--surface-foreground);
+  --color-surface-alt: var(--surface-alt);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+@keyframes typing-blink {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
