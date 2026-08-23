@@ -71,25 +71,6 @@ function AuthenticatedApp() {
 
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="flex items-center justify-between border-b border-border bg-surface px-6 py-3">
-        <h1 className="m-0 text-lg font-semibold text-foreground">AI Assistant</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-foreground">
-            {accounts[0]?.name}
-            {accounts[0]?.username && (
-              <span className="ml-1 font-normal text-muted-foreground">
-                ({accounts[0].username})
-              </span>
-            )}
-          </span>
-          <button
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover"
-            onClick={() => instance.logoutRedirect()}
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
       <main className="flex flex-1 overflow-hidden">
         <ConversationSidebar
           conversations={conversations}
@@ -98,6 +79,9 @@ function AuthenticatedApp() {
           onNew={() => setCurrentConversationId(null)}
           onDelete={handleDeleteConversation}
           onRename={handleRenameConversation}
+          userName={accounts[0]?.name}
+          userEmail={accounts[0]?.username}
+          onSignOut={() => instance.logoutRedirect()}
         />
         <div className="flex-1 overflow-hidden">
           <ChatWindow

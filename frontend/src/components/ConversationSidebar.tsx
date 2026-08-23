@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { MessageSquare, Plus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { LogOut, MessageSquare, Plus, Trash2, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../types";
 
@@ -76,6 +76,70 @@ function ConversationTitle({
   );
 }
 
+function UserMenu({
+  name,
+  email,
+  onSignOut,
+}: {
+  name?: string;
+  email?: string;
+  onSignOut: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative border-t border-border p-2">
+      {open && (
+        <div className="absolute bottom-full left-2 right-2 mb-1 rounded-md border border-border bg-surface p-1 shadow-lg">
+          <button
+            onClick={() => {
+              setOpen(false);
+              onSignOut();
+            }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-foreground hover:bg-surface-alt"
+          >
+            <LogOut className="h-4 w-4" />
+            Sign out
+          </button>
+        </div>
+      )}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-surface-alt"
+      >
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+          <User className="h-4 w-4" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-foreground">
+            {name || "Account"}
+          </span>
+          {email && (
+            <span className="block truncate text-xs text-muted-foreground">{email}</span>
+          )}
+        </span>
+      </button>
+    </div>
+  );
+}
+
 export function ConversationSidebar({
   conversations,
   activeId,
@@ -83,6 +147,9 @@ export function ConversationSidebar({
   onNew,
   onDelete,
   onRename,
+  userName,
+  userEmail,
+  onSignOut,
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
@@ -90,6 +157,9 @@ export function ConversationSidebar({
   onNew: () => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
+  userName?: string;
+  userEmail?: string;
+  onSignOut: () => void;
 }) {
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
@@ -141,6 +211,7 @@ export function ConversationSidebar({
           ))}
         </div>
       </div>
+      <UserMenu name={userName} email={userEmail} onSignOut={onSignOut} />
     </aside>
   );
 }
