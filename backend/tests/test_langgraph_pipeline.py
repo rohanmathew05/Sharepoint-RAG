@@ -714,3 +714,85 @@ async def test_entity_classification_failure_falls_back_to_single_search(monkeyp
 
     response = await service.answer_question(USER_A, "compare neilstown and ronanstown")
     assert response.retrieval_attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_comparison_entity_retries_and_recovers_from_a_spelling_mistake(monkeypatch):
+    """Reproduces the real failure: "Neillstown Community Center" (the
+    user's spelling) finds nothing because the actual document says
+    "Centre". The per-entity retry loop should get more than one shot at
+    this (not just a single rewrite attempt), and each attempt should
+    show up as its own reasoning step so a retry is actually visible
+    instead of looking like nothing happened."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    centre_doc = SourceDocument(
+        document_id="doc-neillstown",
+        document_name="NEILLSTOWN COMMUNITY CENTRE.xlsx",
+        web_url="https://contoso.sharepoint.com/neillstown-centre.xlsx",
+        relevant_content="Site Name NEILLSTOWN COMMUNITY CENTRE, GIS ID NC-4471.",
+    )
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(
+            is_comparison=True, entities=["Neillstown Community Center", "ronanstown"]
+        )
+
+    search_calls: list[str] = []
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        if "centre" in query.lower():
+            return [centre_doc]
+        if "ronanstown" in query.lower():
+            return [ronanstown_doc]
+        return []  # "Center" (wrong spelling) never matches
+
+    async def fake_evaluate_relevance(question, context):
+        return bool(context.strip())
+
+    async def fake_rewrite(original_question, previous_queries):
+        # Simulates the real spelling-correction-first rewrite strategy.
+        return original_question.replace("Center", "Centre")
+
+    async def fake_comparison_answer(question, context):
+        return "Neillstown Community Centre is NC-4471 and Ronanstown is R-2."
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    response = await service.answer_question(
+        USER_A, "compare Neillstown Community Center and ronanstown"
+    )
+
+    # The first attempt (wrong spelling) failed, and a second attempt
+    # (after rewrite) found the document — more than one search call for
+    # that entity, not just the single initial attempt.
+    assert "Neillstown Community Center" in search_calls
+    assert "Neillstown Community Centre" in search_calls
+    assert len(response.citations) == 2
+    document_names = {c.document_name for c in response.citations}
+    assert document_names == {"NEILLSTOWN COMMUNITY CENTRE.xlsx", "RONANSTOWN.xlsx"}
+
+    # Both attempts for the mis-spelled entity should be visible as
+    # separate reasoning steps, not collapsed into one final verdict.
+    search_step_labels = [
+        s.label for s in response.reasoning_steps if s.kind == "search"
+    ]
+    assert 'Searching for "Neillstown Community Center"' in search_step_labels
+    assert 'Searching for "Neillstown Community Centre"' in search_step_labels

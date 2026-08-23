@@ -36,7 +36,10 @@ class Settings(BaseSettings):
     # Comparison questions ("compare X and Y") search each entity
     # independently; this caps retries *per entity* so an N-entity
     # comparison can't balloon to N * MAX_RETRIES sequential Graph calls.
-    MAX_RETRIES_PER_ENTITY: int = 2
+    # 4 (1 initial + 3 rewrites) gives the spelling-correction-first
+    # strategy in _llm_rewrite_query real room to recover from a typo
+    # (e.g. "Center" vs "Centre") without needing to guess right first try.
+    MAX_RETRIES_PER_ENTITY: int = 4
 
 
 @lru_cache

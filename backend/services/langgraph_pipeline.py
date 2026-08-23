@@ -441,6 +441,16 @@ class LangGraphRAGService:
                     except Exception:
                         logger.warning("Relevance evaluation failed during comparison search; defaulting to relevant", exc_info=True)
                         relevant = True
+                # One reasoning step per attempt (not just a final summary
+                # per entity) — mirrors _search's behavior on the
+                # single-topic path, so a rewrite/retry is actually
+                # visible in the UI instead of looking like it never
+                # happened.
+                reasoning_steps.append(self._step(
+                    "search",
+                    f'Searching for "{query}"',
+                    f"Found {len(docs)} document(s)." if docs else "No documents found.",
+                ))
                 if relevant:
                     break
                 if attempt < self.settings.MAX_RETRIES_PER_ENTITY:
@@ -448,13 +458,9 @@ class LangGraphRAGService:
 
             entity_documents[entity] = docs
             entity_found[entity] = bool(docs)
-            reasoning_steps.append(self._step(
-                "search",
-                f'Searching for "{entity}"',
-                f"Found {len(docs)} document(s)." if docs else f'No documents found for "{entity}".',
-            ))
             logger.info(
-                "[compare_search] entity=%r found=%d query=%r", entity, len(docs), query
+                "[compare_search] entity=%r found=%d query=%r attempts=%d",
+                entity, len(docs), query, len(tried),
             )
 
         merged_documents = self._merge_and_dedupe(entity_documents)
