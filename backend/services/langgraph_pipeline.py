@@ -423,7 +423,14 @@ class LangGraphRAGService:
         for entity in entities:
             query = entity
             tried: list[str] = []
-            docs: list[SourceDocument] = []
+            # Keep the richest result ever found for this entity, not
+            # just the latest attempt — a later rewrite that finds
+            # nothing (or something thinner) shouldn't erase an earlier
+            # attempt that actually found real documents. Same hedge
+            # _evaluate already applies at the whole-question level via
+            # best_documents/best_context, generalized per entity here.
+            best_docs: list[SourceDocument] = []
+            best_context_len = 0
             for attempt in range(1, self.settings.MAX_RETRIES_PER_ENTITY + 1):
                 docs = await self.sharepoint.search(
                     state["user"], query, max_results=per_entity_results
@@ -434,9 +441,18 @@ class LangGraphRAGService:
                 relevant = False
                 if docs:
                     context = self._build_context(docs)
+                    if len(context) > best_context_len:
+                        best_docs, best_context_len = docs, len(context)
                     try:
+                        # Ask only about this entity in isolation, not
+                        # the full comparison question — "do these
+                        # Ronanstown documents let you answer 'compare
+                        # neilstown and ronanstown'" is unanswerable by
+                        # any single entity's documents, so phrasing it
+                        # that way would mark a genuinely good find as
+                        # not-relevant and trigger pointless retries.
                         relevant = await self.llm.evaluate_relevance(
-                            f"{state['question']} (specifically regarding {entity})", context
+                            f"What information is available about {entity}?", context
                         )
                     except Exception:
                         logger.warning("Relevance evaluation failed during comparison search; defaulting to relevant", exc_info=True)
@@ -456,11 +472,11 @@ class LangGraphRAGService:
                 if attempt < self.settings.MAX_RETRIES_PER_ENTITY:
                     query = await self._llm_rewrite_query(entity, tried)
 
-            entity_documents[entity] = docs
-            entity_found[entity] = bool(docs)
+            entity_documents[entity] = best_docs
+            entity_found[entity] = bool(best_docs)
             logger.info(
                 "[compare_search] entity=%r found=%d query=%r attempts=%d",
-                entity, len(docs), query, len(tried),
+                entity, len(best_docs), query, len(tried),
             )
 
         merged_documents = self._merge_and_dedupe(entity_documents)

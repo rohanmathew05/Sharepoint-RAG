@@ -796,3 +796,181 @@ async def test_comparison_entity_retries_and_recovers_from_a_spelling_mistake(mo
     ]
     assert 'Searching for "Neillstown Community Center"' in search_step_labels
     assert 'Searching for "Neillstown Community Centre"' in search_step_labels
+
+
+@pytest.mark.asyncio
+async def test_comparison_relevance_check_only_asks_about_the_one_entity(monkeypatch):
+    """The relevance question sent for an entity's search must not be
+    the full comparison question — no single entity's documents can
+    ever "answer" a comparison between two things on their own, so
+    phrasing it that way would mark a genuinely good find as
+    not-relevant and trigger pointless retries."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+    neilstown_doc = SourceDocument(
+        document_id="doc-neilstown",
+        document_name="NEILSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/neilstown.xlsx",
+        relevant_content="Site Name NEILSTOWN, GIS ID N-1.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["neilstown", "ronanstown"])
+
+    async def fake_search(user, query, max_results=8):
+        return [ronanstown_doc] if "ronanstown" in query.lower() else [neilstown_doc]
+
+    captured_questions: list[str] = []
+
+    async def fake_evaluate_relevance(question, context):
+        captured_questions.append(question)
+        return bool(context.strip())
+
+    async def fake_comparison_answer(question, context):
+        return "comparison answer"
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    await service.answer_question(USER_A, "compare neilstown and ronanstown")
+
+    ronanstown_questions = [q for q in captured_questions if "ronanstown" in q.lower()]
+    assert ronanstown_questions
+    for question in ronanstown_questions:
+        assert "compare" not in question.lower()
+        assert "neilstown" not in question.lower()
+
+
+@pytest.mark.asyncio
+async def test_comparison_keeps_best_entity_result_despite_a_later_worse_retry(monkeypatch):
+    """Reproduces the reported bug: the first search for an entity finds
+    real documents, but the relevance verdict says not-relevant (stubbed
+    directly here to isolate this fix from the relevance-framing fix
+    above), so the loop retries — and every later rewrite finds nothing.
+    The entity's final result must still be the real documents from the
+    first attempt, not empty."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+    neilstown_doc = SourceDocument(
+        document_id="doc-neilstown",
+        document_name="NEILSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/neilstown.xlsx",
+        relevant_content="Site Name NEILSTOWN, GIS ID N-1.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["ronanstown", "neilstown"])
+
+    ronanstown_calls: list[str] = []
+
+    async def fake_search(user, query, max_results=8):
+        if "neilstown" in query.lower():
+            return [neilstown_doc]  # this entity always succeeds cleanly
+        ronanstown_calls.append(query)
+        if len(ronanstown_calls) == 1:
+            return [ronanstown_doc]  # the real find, on attempt 1
+        return []  # every later rewrite finds nothing
+
+    async def fake_evaluate_relevance(question, context):
+        # Ronanstown's find is always judged not-relevant, forcing every
+        # retry; Neilstown succeeds immediately.
+        return "ronanstown" not in question.lower()
+
+    async def fake_rewrite(entity, tried):
+        return f"{tried[-1]} broader"
+
+    captured_context = {}
+
+    async def fake_comparison_answer(question, context):
+        captured_context["context"] = context
+        return "Ronanstown is R-2 and Neilstown is N-1."
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service, "_llm_rewrite_query", fake_rewrite)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    response = await service.answer_question(USER_A, "compare ronanstown and neilstown")
+
+    from backend.core.config import get_settings
+    assert len(ronanstown_calls) == get_settings().MAX_RETRIES_PER_ENTITY  # every retry was used
+    assert "RONANSTOWN" in captured_context["context"]  # but the real find still survived
+    document_names = {c.document_name for c in response.citations}
+    assert "RONANSTOWN.xlsx" in document_names
+
+
+@pytest.mark.asyncio
+async def test_comparison_entity_that_succeeds_immediately_does_not_retry(monkeypatch):
+    """A genuinely on-topic first find should stop the loop right away —
+    no wasted extra search calls for an entity that already succeeded."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+    neilstown_doc = SourceDocument(
+        document_id="doc-neilstown",
+        document_name="NEILSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/neilstown.xlsx",
+        relevant_content="Site Name NEILSTOWN, GIS ID N-1.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["ronanstown", "neilstown"])
+
+    search_calls: list[str] = []
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        return [ronanstown_doc] if "ronanstown" in query.lower() else [neilstown_doc]
+
+    async def fake_evaluate_relevance(question, context):
+        return True  # genuinely relevant on the very first attempt, every time
+
+    async def fake_comparison_answer(question, context):
+        return "Ronanstown is R-2 and Neilstown is N-1."
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+
+    await service.answer_question(USER_A, "compare ronanstown and neilstown")
+
+    assert len(search_calls) == 2  # one search per entity, no retries for either
