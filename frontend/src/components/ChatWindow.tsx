@@ -1,13 +1,16 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { ArrowUp } from "lucide-react";
 import type { ChatMessage, Citation } from "../types";
-import { ApiError, SessionExpiredError, streamChatMessage } from "../api/client";
+import { ApiError, SessionExpiredError, getConversation, streamChatMessage } from "../api/client";
 import { MessageBubble } from "./MessageBubble";
 import { SourcesPanel } from "./SourcesPanel";
 
 export function ChatWindow({
   getToken,
   onSessionExpired,
+  conversationId,
+  onConversationCreated,
+  onConversationUpdated,
 }: {
   getToken: () => Promise<string>;
   // Called instead of rendering an error bubble when the backend reports
@@ -15,11 +18,53 @@ export function ChatWindow({
   // fix) — lets the parent show a proper "sign in again" prompt instead
   // of burying it in the conversation.
   onSessionExpired?: () => void;
+  // null = a brand-new, not-yet-persisted chat (messages start empty and
+  // the backend lazily creates a conversation on first send). Non-null
+  // switches to loading and displaying that conversation's messages.
+  conversationId: string | null;
+  // Fired once, when a new chat's first message causes the backend to
+  // create a conversation — lets the parent adopt the id so the sidebar
+  // and subsequent messages in this session reuse it.
+  onConversationCreated: (id: string) => void;
+  // Fired after an exchange completes, so the parent can refresh the
+  // sidebar (e.g. to pick up the auto-derived title / updated timestamp).
+  onConversationUpdated?: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [openSourcesFor, setOpenSourcesFor] = useState<Citation[] | null>(null);
+  // When this component's own submit flow creates a conversation
+  // mid-stream (conversationId was null), the resulting conversationId
+  // prop change would otherwise re-trigger the fetch effect below and
+  // clobber the in-progress streaming message with what's persisted so
+  // far (just the user's message — the assistant reply isn't saved until
+  // the stream finishes). Tracking the id we just created locally lets
+  // the effect recognize "this change came from us" and skip the fetch.
+  const justCreatedIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (conversationId === null) {
+      setMessages([]);
+      return;
+    }
+    if (conversationId === justCreatedIdRef.current) {
+      justCreatedIdRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    getConversation(conversationId, getToken)
+      .then((detail) => {
+        if (!cancelled) setMessages(detail.messages);
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -46,8 +91,16 @@ export function ChatWindow({
     }
 
     try {
-      await streamChatMessage(question, nextMessages, getToken, (event) => {
-        if (event.type === "step") {
+      await streamChatMessage(question, nextMessages, conversationId, getToken, (event) => {
+        if (event.type === "conversation") {
+          // Only fires for a brand-new chat (conversationId was null) —
+          // adopt the id the backend just assigned so the parent's state
+          // (and the sidebar) picks it up.
+          if (conversationId === null) {
+            justCreatedIdRef.current = event.id;
+            onConversationCreated(event.id);
+          }
+        } else if (event.type === "step") {
           updateAssistant((m) => ({
             ...m,
             reasoningSteps: [...(m.reasoningSteps ?? []), event.step],
@@ -61,6 +114,7 @@ export function ChatWindow({
             citations: event.citations,
             isStreaming: false,
           }));
+          onConversationUpdated?.();
         } else if (event.type === "error") {
           if (event.error_code === "obo_token_expired" && onSessionExpired) {
             onSessionExpired();

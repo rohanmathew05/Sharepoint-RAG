@@ -47,7 +47,7 @@ async def test_llm_says_chitchat_skips_search_entirely(monkeypatch):
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("search should not be reached when the LLM says chitchat")
 
-    async def fake_conversational_reply(question: str) -> str:
+    async def fake_conversational_reply(question: str, history=None) -> str:
         return "Hey there! Ask me anything about the SharePoint docs."
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -70,10 +70,10 @@ async def test_llm_says_search_triggers_retrieval(monkeypatch):
     async def fake_search(user, query, max_results=8):
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "I couldn't find that — could you give me a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -95,7 +95,7 @@ async def test_classification_failure_falls_back_to_heuristic(monkeypatch):
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("search should not be reached for an obvious greeting")
 
-    async def fake_conversational_reply(question: str) -> str:
+    async def fake_conversational_reply(question: str, history=None) -> str:
         return "Hi there!"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
@@ -119,10 +119,10 @@ async def test_classification_failure_on_real_question_still_searches(monkeypatc
     async def fake_search(user, query, max_results=8):
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "I couldn't find that — could you give me a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", broken_classify)
@@ -161,7 +161,7 @@ async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
             )
         ]
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "Based on the documents: Model P-450."
 
     async def fake_rewrite(original_question, previous_queries):
@@ -215,7 +215,7 @@ async def test_llm_relevance_check_triggers_retry_on_unhelpful_snippet(monkeypat
     async def fake_evaluate_relevance(question, context):
         return len(search_calls) > 1
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "The GIS ID reference is WFV0002188."
 
     async def fake_rewrite(original_question, previous_queries):
@@ -246,13 +246,13 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
         search_calls.append(query)
         return []  # never finds anything
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
     async def fake_rewrite(original_question, previous_queries):
         return f"{previous_queries[-1]} broader"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "I couldn't find that — could you give me a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -290,7 +290,7 @@ async def test_exhausted_retries_use_llm_generated_clarification(monkeypatch):
     async def fake_rewrite(original_question, previous_queries):
         return f"{previous_queries[-1]} broader"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         captured_attempts.append(list(attempted_queries))
         return "I couldn't find a match — could you share the exact site name or a reference number?"
 
@@ -349,7 +349,7 @@ async def test_exhausted_retries_fall_back_to_best_attempt_content(monkeypatch):
     async def fake_rewrite(original_question, previous_queries):
         return f"{previous_queries[-1]} broader"
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         assert "NC-4471" in context  # must be answering from the best-found context
         return "The GIS ID is NC-4471."
 
@@ -380,7 +380,7 @@ async def test_chitchat_reply_is_llm_generated(monkeypatch):
     async def fake_classify(question: str) -> bool:
         return False  # LLM verdict: CHITCHAT
 
-    async def fake_conversational_reply(question: str) -> str:
+    async def fake_conversational_reply(question: str, history=None) -> str:
         assert question == "good morning!"
         return "Good morning! Happy to help you find anything in the SharePoint docs."
 
@@ -401,7 +401,7 @@ async def test_rewrite_prompt_includes_full_query_history(monkeypatch):
     service = LangGraphRAGService()
     captured_prompt = {}
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         captured_prompt["question"] = question
         return "a genuinely new query"
 
@@ -429,7 +429,7 @@ async def test_rewrite_prompt_prioritizes_spelling_correction_before_dropping_wo
     service = LangGraphRAGService()
     captured_prompt = {}
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         captured_prompt["question"] = question
         return "Neillstown Community Centre"
 
@@ -457,7 +457,7 @@ async def test_rewrite_query_passes_through_an_or_joined_spelling_variant_query(
     OR-joined rewrite reaches sharepoint.search unmangled."""
     service = LangGraphRAGService()
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return '"neilstown" OR "neillstown" OR "neilston"'
 
     monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
@@ -483,10 +483,10 @@ async def test_delegated_token_search_is_the_only_permission_boundary(monkeypatc
         received_users.append(user)
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "I couldn't find that — could you give me a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -519,10 +519,10 @@ async def test_single_topic_question_never_calls_entity_classification(monkeypat
     async def fake_search(user, query, max_results=8):
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "Could you share a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -577,7 +577,7 @@ async def test_comparison_question_searches_each_entity_and_merges_results(monke
     async def fake_evaluate_relevance(question, context):
         return bool(context.strip())
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         assert "neilstown" in context.lower() and "ronanstown" in context.lower()
         return "Neilstown is N-1 and Ronanstown is R-2."
 
@@ -635,7 +635,7 @@ async def test_comparison_with_one_entity_not_found_still_answers_for_the_other(
 
     captured_context = {}
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         captured_context["context"] = context
         return "I found information on ronanstown but nothing on cliffield."
 
@@ -692,7 +692,7 @@ async def test_three_entity_comparison_generalizes(monkeypatch):
     async def fake_evaluate_relevance(question, context):
         return bool(context.strip())
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         return "compared all three"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -722,10 +722,10 @@ async def test_entity_classification_failure_falls_back_to_single_search(monkeyp
     async def fake_search(user, query, max_results=8):
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "Could you share a document name or reference number?"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -788,7 +788,7 @@ async def test_comparison_entity_retries_and_recovers_from_a_spelling_mistake(mo
         # Simulates the real spelling-correction-first rewrite strategy.
         return original_question.replace("Center", "Centre")
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         return "Neillstown Community Centre is NC-4471 and Ronanstown is R-2."
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -859,7 +859,7 @@ async def test_comparison_relevance_check_only_asks_about_the_one_entity(monkeyp
         captured_questions.append(question)
         return bool(context.strip())
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         return "comparison answer"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -928,7 +928,7 @@ async def test_comparison_keeps_best_entity_result_despite_a_later_worse_retry(m
 
     captured_context = {}
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         captured_context["context"] = context
         return "Ronanstown is R-2 and Neilstown is N-1."
 
@@ -984,7 +984,7 @@ async def test_comparison_entity_that_succeeds_immediately_does_not_retry(monkey
     async def fake_evaluate_relevance(question, context):
         return True  # genuinely relevant on the very first attempt, every time
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         return "Ronanstown is R-2 and Neilstown is N-1."
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -1033,7 +1033,7 @@ async def test_citations_are_narrowed_to_documents_the_answer_actually_used(monk
     async def fake_evaluate_relevance(question, context):
         return True
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "Based on the actual fact."
 
     async def fake_select_used_citations(answer, candidates_block):
@@ -1078,7 +1078,7 @@ async def test_citation_selection_failure_keeps_all_citations(monkeypatch):
     async def fake_evaluate_relevance(question, context):
         return True
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "An answer."
 
     async def broken_select_used_citations(answer, candidates_block):
@@ -1121,7 +1121,7 @@ async def test_citation_selection_returning_nothing_keeps_all_citations(monkeypa
     async def fake_evaluate_relevance(question, context):
         return True
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "An answer."
 
     async def fake_select_used_citations(answer, candidates_block):
@@ -1152,10 +1152,10 @@ async def test_clarification_reply_never_calls_citation_selection(monkeypatch):
     async def fake_search(user, query, max_results=8):
         return []
 
-    async def fake_generate_answer(question, context):
+    async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_clarification(question, attempted_queries):
+    async def fake_clarification(question, attempted_queries, history=None):
         return "Could you share a document name or reference number?"
 
     async def fail_if_called(answer, candidates_block):
@@ -1206,7 +1206,7 @@ async def test_comparison_answer_citations_are_also_filtered(monkeypatch):
     async def fake_evaluate_relevance(question, context):
         return True
 
-    async def fake_comparison_answer(question, context):
+    async def fake_comparison_answer(question, context, history=None):
         return "Ronanstown is R-2 (Neilstown had nothing comparable worth citing)."
 
     async def fake_select_used_citations(answer, candidates_block):

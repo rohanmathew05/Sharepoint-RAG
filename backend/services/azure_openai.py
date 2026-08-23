@@ -10,6 +10,7 @@ from openai import AsyncAzureOpenAI
 from pydantic import BaseModel
 
 from backend.core.config import get_settings
+from backend.models.chat import ChatMessage
 
 SYSTEM_PROMPT = (
     "You are an internal company AI assistant. Answer the user's question "
@@ -124,12 +125,25 @@ class AzureOpenAIService:
             )
         return self._client
 
-    async def generate_answer(self, question: str, context: str) -> str:
+    @staticmethod
+    def _history_messages(history: list[ChatMessage] | None) -> list[dict]:
+        # Inserted between the system prompt and the final user turn — the
+        # standard multi-turn chat-completions pattern. Capped by the
+        # caller (see LangGraphRAGService) to MAX_HISTORY_MESSAGES before
+        # it ever reaches here, so this doesn't itself bound anything.
+        if not history:
+            return []
+        return [{"role": m.role, "content": m.content} for m in history]
+
+    async def generate_answer(
+        self, question: str, context: str, history: list[ChatMessage] | None = None
+    ) -> str:
         client = self._get_client()
         response = await client.chat.completions.create(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": f"Context:\n{context}\n\nQuestion: {question}",
@@ -139,12 +153,15 @@ class AzureOpenAIService:
         )
         return response.choices[0].message.content or ""
 
-    async def generate_comparison_answer(self, question: str, context: str) -> str:
+    async def generate_comparison_answer(
+        self, question: str, context: str, history: list[ChatMessage] | None = None
+    ) -> str:
         client = self._get_client()
         response = await client.chat.completions.create(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": f"Context:\n{context}\n\nQuestion: {question}",
@@ -154,11 +171,14 @@ class AzureOpenAIService:
         )
         return response.choices[0].message.content or ""
 
-    def generate_comparison_answer_stream(self, question: str, context: str) -> AsyncIterator[str]:
+    def generate_comparison_answer_stream(
+        self, question: str, context: str, history: list[ChatMessage] | None = None
+    ) -> AsyncIterator[str]:
         return self._stream_deltas(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": f"Context:\n{context}\n\nQuestion: {question}",
@@ -177,11 +197,14 @@ class AzureOpenAIService:
             if delta:
                 yield delta
 
-    def generate_answer_stream(self, question: str, context: str) -> AsyncIterator[str]:
+    def generate_answer_stream(
+        self, question: str, context: str, history: list[ChatMessage] | None = None
+    ) -> AsyncIterator[str]:
         return self._stream_deltas(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": f"Context:\n{context}\n\nQuestion: {question}",
@@ -190,24 +213,31 @@ class AzureOpenAIService:
             temperature=0.2,
         )
 
-    def generate_conversational_reply_stream(self, question: str) -> AsyncIterator[str]:
+    def generate_conversational_reply_stream(
+        self, question: str, history: list[ChatMessage] | None = None
+    ) -> AsyncIterator[str]:
         return self._stream_deltas(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": CONVERSATIONAL_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {"role": "user", "content": question},
             ],
             temperature=0.5,
         )
 
     def generate_clarification_stream(
-        self, question: str, attempted_queries: list[str]
+        self,
+        question: str,
+        attempted_queries: list[str],
+        history: list[ChatMessage] | None = None,
     ) -> AsyncIterator[str]:
         attempts_text = "\n".join(f"- {q}" for q in attempted_queries) or "- (none)"
         return self._stream_deltas(
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": CLARIFICATION_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": (
@@ -218,7 +248,9 @@ class AzureOpenAIService:
             temperature=0.5,
         )
 
-    async def generate_conversational_reply(self, question: str) -> str:
+    async def generate_conversational_reply(
+        self, question: str, history: list[ChatMessage] | None = None
+    ) -> str:
         """A genuine LLM-generated reply for greetings/chitchat — not a
         canned string, so it actually responds to what the user said
         instead of always printing the same sentence."""
@@ -227,6 +259,7 @@ class AzureOpenAIService:
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": CONVERSATIONAL_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {"role": "user", "content": question},
             ],
             temperature=0.5,
@@ -234,7 +267,10 @@ class AzureOpenAIService:
         return response.choices[0].message.content or ""
 
     async def generate_clarification(
-        self, question: str, attempted_queries: list[str]
+        self,
+        question: str,
+        attempted_queries: list[str],
+        history: list[ChatMessage] | None = None,
     ) -> str:
         """Called when every retry has been exhausted without finding
         relevant content. Asks the LLM to explain, in natural language,
@@ -247,6 +283,7 @@ class AzureOpenAIService:
             model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": CLARIFICATION_SYSTEM_PROMPT},
+                *self._history_messages(history),
                 {
                     "role": "user",
                     "content": (

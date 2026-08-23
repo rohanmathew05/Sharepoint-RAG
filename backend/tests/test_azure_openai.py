@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.models.chat import ChatMessage
 from backend.services.azure_openai import (
     SYSTEM_PROMPT,
     AzureOpenAIService,
@@ -61,6 +62,37 @@ async def test_generate_answer_grounds_in_context_via_system_prompt(monkeypatch)
     assert messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
     assert "Workers must wear a harness" in messages[1]["content"]
     assert "What PPE is required?" in messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_answer_threads_history_between_system_and_final_user_turn(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(chat_content="An answer.")
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    history = [
+        ChatMessage(role="user", content="what is the deadline for site A?"),
+        ChatMessage(role="assistant", content="The deadline for site A is June 1st."),
+    ]
+    await service.generate_answer(question="what about site B?", context="", history=history)
+
+    messages = fake_client.last_chat_kwargs["messages"]
+    assert messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert messages[1] == {"role": "user", "content": "what is the deadline for site A?"}
+    assert messages[2] == {"role": "assistant", "content": "The deadline for site A is June 1st."}
+    assert "what about site B?" in messages[3]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_answer_with_no_history_omits_history_turns(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(chat_content="An answer.")
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    await service.generate_answer(question="hi", context="")
+
+    messages = fake_client.last_chat_kwargs["messages"]
+    assert len(messages) == 2  # just system + the final user turn, no gap
 
 
 @pytest.mark.asyncio

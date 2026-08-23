@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import {
   AuthenticatedTemplate,
@@ -6,12 +6,17 @@ import {
   useMsal,
 } from "@azure/msal-react";
 import { ChatWindow } from "./components/ChatWindow";
+import { ConversationSidebar } from "./components/ConversationSidebar";
+import { deleteConversation, listConversations } from "./api/client";
 import { loginRequest } from "./authConfig";
 import { clearAuthError, getLatestAuthError, subscribeAuthError } from "./authEvents";
+import type { ConversationSummary } from "./types";
 
 function AuthenticatedApp() {
   const { instance, accounts } = useMsal();
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
 
   async function getToken(): Promise<string> {
     const account = accounts[0];
@@ -28,6 +33,27 @@ function AuthenticatedApp() {
       }
       throw err;
     }
+  }
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await listConversations(getToken));
+    } catch {
+      // Sidebar list is a convenience, not the source of truth for the
+      // active conversation — a failed refresh just leaves the list
+      // stale until the next successful one, rather than blocking chat.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    refreshConversations();
+  }, [refreshConversations]);
+
+  async function handleDeleteConversation(id: string) {
+    await deleteConversation(id, getToken);
+    if (id === currentConversationId) setCurrentConversationId(null);
+    await refreshConversations();
   }
 
   return (
@@ -51,8 +77,26 @@ function AuthenticatedApp() {
           </button>
         </div>
       </header>
-      <main className="flex-1 overflow-hidden">
-        <ChatWindow getToken={getToken} onSessionExpired={() => setSessionExpired(true)} />
+      <main className="flex flex-1 overflow-hidden">
+        <ConversationSidebar
+          conversations={conversations}
+          activeId={currentConversationId}
+          onSelect={setCurrentConversationId}
+          onNew={() => setCurrentConversationId(null)}
+          onDelete={handleDeleteConversation}
+        />
+        <div className="flex-1 overflow-hidden">
+          <ChatWindow
+            getToken={getToken}
+            onSessionExpired={() => setSessionExpired(true)}
+            conversationId={currentConversationId}
+            onConversationCreated={(id) => {
+              setCurrentConversationId(id);
+              refreshConversations();
+            }}
+            onConversationUpdated={refreshConversations}
+          />
+        </div>
       </main>
       {sessionExpired && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
