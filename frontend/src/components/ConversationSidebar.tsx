@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import { MessageSquare, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../types";
@@ -14,18 +15,81 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+function ConversationTitle({
+  conversation,
+  onRename,
+}: {
+  conversation: ConversationSummary;
+  onRename: (id: string, title: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(conversation.title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function startEditing() {
+    setDraft(conversation.title);
+    setEditing(true);
+    // Focus happens after the input mounts, on the next tick.
+    requestAnimationFrame(() => inputRef.current?.select());
+  }
+
+  function commit() {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== conversation.title) onRename(conversation.id, trimmed);
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+          }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        autoFocus
+        className="block w-full truncate rounded border border-input bg-background px-1 py-0 text-sm text-foreground outline-none focus:border-primary"
+      />
+    );
+  }
+
+  return (
+    <span
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        startEditing();
+      }}
+      className="block truncate"
+      title="Double-click to rename"
+    >
+      {conversation.title || "New conversation"}
+    </span>
+  );
+}
+
 export function ConversationSidebar({
   conversations,
   activeId,
   onSelect,
   onNew,
   onDelete,
+  onRename,
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => void;
 }) {
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
@@ -48,27 +112,26 @@ export function ConversationSidebar({
           {conversations.map((c) => (
             <div
               key={c.id}
+              onClick={() => onSelect(c.id)}
               className={cn(
-                "group flex items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors",
+                "group flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors",
                 c.id === activeId
                   ? "bg-primary/10 text-foreground"
                   : "text-muted-foreground hover:bg-surface-alt hover:text-foreground"
               )}
             >
-              <button
-                onClick={() => onSelect(c.id)}
-                className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              >
-                <MessageSquare className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate">{c.title || "New conversation"}</span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {relativeTime(c.updated_at)}
-                  </span>
+              <MessageSquare className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1">
+                <ConversationTitle conversation={c} onRename={onRename} />
+                <span className="block truncate text-xs text-muted-foreground">
+                  {relativeTime(c.updated_at)}
                 </span>
-              </button>
+              </span>
               <button
-                onClick={() => onDelete(c.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(c.id);
+                }}
                 aria-label="Delete conversation"
                 className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
               >

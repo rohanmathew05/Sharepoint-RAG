@@ -7,7 +7,7 @@ import {
 } from "@azure/msal-react";
 import { ChatWindow } from "./components/ChatWindow";
 import { ConversationSidebar } from "./components/ConversationSidebar";
-import { deleteConversation, listConversations } from "./api/client";
+import { deleteConversation, listConversations, renameConversation } from "./api/client";
 import { loginRequest } from "./authConfig";
 import { clearAuthError, getLatestAuthError, subscribeAuthError } from "./authEvents";
 import type { ConversationSummary } from "./types";
@@ -56,6 +56,19 @@ function AuthenticatedApp() {
     await refreshConversations();
   }
 
+  async function handleRenameConversation(id: string, title: string) {
+    // Update local state immediately rather than waiting on a full
+    // refetch — renaming is the one action where the round-trip delay
+    // would otherwise be visible as the typed title flashing back to
+    // the old one for a moment.
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+    try {
+      await renameConversation(id, title, getToken);
+    } catch {
+      await refreshConversations(); // roll back to the real state on failure
+    }
+  }
+
   return (
     <div className="flex h-screen flex-col bg-background">
       <header className="flex items-center justify-between border-b border-border bg-surface px-6 py-3">
@@ -84,6 +97,7 @@ function AuthenticatedApp() {
           onSelect={setCurrentConversationId}
           onNew={() => setCurrentConversationId(null)}
           onDelete={handleDeleteConversation}
+          onRename={handleRenameConversation}
         />
         <div className="flex-1 overflow-hidden">
           <ChatWindow
