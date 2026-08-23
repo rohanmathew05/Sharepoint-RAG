@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@plugin "@tailwindcss/typography";
 
 @theme {
   --font-sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;

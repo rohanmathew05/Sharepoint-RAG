@@ -13,10 +13,13 @@
     "@azure/msal-browser": "^3.27.0",
     "@azure/msal-react": "^2.1.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@radix-ui/react-dialog": "^1.1.23",
+    "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.1",

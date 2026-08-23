@@ -1,3 +1,5 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatMessage, Citation } from "../types";
 import { SourcesPill } from "./SourcesPill";
 import { ReasoningSteps } from "./ReasoningSteps";
@@ -39,13 +41,26 @@ export function MessageBubble({
         )}
         {waitingForFirstContent ? (
           <TypingDots />
-        ) : (
+        ) : isUser || message.isError ? (
           <p className="m-0 whitespace-pre-wrap leading-relaxed">
             {message.content}
             {message.isStreaming && !message.isError && (
               <span className="ml-0.5 inline-block h-4 w-[2px] animate-[typing-blink_1.2s_infinite] bg-current align-middle" />
             )}
           </p>
+        ) : (
+          <div
+            className="prose prose-sm max-w-none leading-relaxed text-foreground
+              prose-headings:text-foreground prose-strong:text-foreground prose-a:text-primary
+              prose-code:text-foreground prose-blockquote:text-muted-foreground
+              prose-li:text-foreground prose-thead:text-foreground
+              prose-hr:border-border prose-table:text-foreground"
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            {message.isStreaming && (
+              <span className="ml-0.5 inline-block h-4 w-[2px] animate-[typing-blink_1.2s_infinite] bg-current align-middle" />
+            )}
+          </div>
         )}
         {message.citations && message.citations.length > 0 && (
           <SourcesPill citations={message.citations} onOpen={onOpenSources} />
