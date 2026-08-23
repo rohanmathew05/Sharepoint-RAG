@@ -49,13 +49,7 @@ export function MessageBubble({
             )}
           </p>
         ) : (
-          <div
-            className="prose prose-sm max-w-none leading-relaxed text-foreground
-              prose-headings:text-foreground prose-strong:text-foreground prose-a:text-primary
-              prose-code:text-foreground prose-blockquote:text-muted-foreground
-              prose-li:text-foreground prose-thead:text-foreground
-              prose-hr:border-border prose-table:text-foreground"
-          >
+          <div className="md-content">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
             {message.isStreaming && (
               <span className="ml-0.5 inline-block h-4 w-[2px] animate-[typing-blink_1.2s_infinite] bg-current align-middle" />

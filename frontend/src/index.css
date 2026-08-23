@@ -1,6 +1,5 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@plugin "@tailwindcss/typography";
 
 @theme {
   --font-sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -67,4 +66,117 @@ body {
 @keyframes typing-blink {
   0%, 80%, 100% { opacity: 0.3; }
   40% { opacity: 1; }
+}
+
+/* Markdown rendering for assistant chat replies. Written by hand rather
+   than via a typography plugin: those collapse the margin of whatever
+   follows a heading, which reads as "no spacing" once the model emits a
+   heading immediately followed by a bold label (a very common LLM habit). */
+.md-content {
+  color: var(--foreground);
+  line-height: 1.6;
+}
+
+.md-content > *:first-child {
+  margin-top: 0;
+}
+.md-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4 {
+  font-weight: 700;
+  color: var(--foreground);
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+}
+.md-content h1 { font-size: 1.25em; }
+.md-content h2 { font-size: 1.15em; }
+.md-content h3 {
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+.md-content h4 { font-size: 1em; }
+
+.md-content p {
+  margin: 0.6em 0;
+}
+
+.md-content strong {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.md-content ul,
+.md-content ol {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+}
+.md-content ul { list-style: disc; }
+.md-content ol { list-style: decimal; }
+.md-content li {
+  margin: 0.25em 0;
+}
+.md-content li > ul,
+.md-content li > ol {
+  margin: 0.25em 0;
+}
+
+.md-content a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-content code {
+  background: var(--muted);
+  border-radius: 0.25rem;
+  padding: 0.1em 0.35em;
+  font-size: 0.85em;
+}
+.md-content pre {
+  background: var(--muted);
+  border-radius: var(--radius-md);
+  padding: 0.75em 1em;
+  margin: 0.6em 0;
+  overflow-x: auto;
+}
+.md-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.md-content blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.9em;
+  margin: 0.6em 0;
+  color: var(--muted-foreground);
+}
+
+.md-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.9em;
+}
+.md-content th,
+.md-content td {
+  border: 1px solid var(--border);
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+.md-content th {
+  background: var(--muted);
+  font-weight: 600;
 }
