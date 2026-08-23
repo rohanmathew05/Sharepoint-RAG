@@ -68,6 +68,16 @@ COMPARISON_SYSTEM_PROMPT = (
     "listed in the context, even if you believe they exist."
 )
 
+CITATION_SELECTOR_SYSTEM_PROMPT = (
+    "You will see an answer that was just written, and a list of candidate "
+    "SharePoint documents that were available to it, each tagged with an "
+    "id. Return only the ids of documents whose content was actually used "
+    "to support a claim in the answer. Exclude any document that was "
+    "retrieved or on-topic but not actually drawn from — being available "
+    "is not enough, it must have genuinely contributed to what the answer "
+    "says."
+)
+
 CLARIFICATION_SYSTEM_PROMPT = (
     "A user asked a question about internal company SharePoint documents. "
     "Several different searches were tried and none of them found a "
@@ -94,6 +104,10 @@ class RelevanceEvaluation(BaseModel):
 class EntityExtraction(BaseModel):
     is_comparison: bool
     entities: list[str]
+
+
+class CitationSelection(BaseModel):
+    used_document_ids: list[str]
 
 
 class AzureOpenAIService:
@@ -289,6 +303,33 @@ class AzureOpenAIService:
             response_format=EntityExtraction,
         )
         return response.choices[0].message.parsed
+
+    async def select_used_citations(self, answer: str, candidates_block: str) -> list[str]:
+        """Which of the retrieved documents did the already-written
+        answer actually draw from? Search can legitimately return
+        several plausible documents; citing all of them regardless of
+        whether the answer used them misrepresents what the answer is
+        actually grounded in. Called once per composed answer, never
+        per search attempt.
+
+        Callers should treat any exception, or an empty result, as "keep
+        every citation" — a flaky or overly-strict filter call should
+        never leave a real, grounded answer with zero sources.
+        """
+        client = self._get_client()
+        response = await client.beta.chat.completions.parse(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": CITATION_SELECTOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Answer:\n{answer}\n\nCandidate documents:\n{candidates_block}",
+                },
+            ],
+            temperature=0,
+            response_format=CitationSelection,
+        )
+        return response.choices[0].message.parsed.used_document_ids
 
     async def evaluate_relevance(self, question: str, context: str) -> bool:
         """Does the retrieved context actually contain enough to answer

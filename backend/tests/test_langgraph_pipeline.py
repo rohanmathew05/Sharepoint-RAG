@@ -443,6 +443,28 @@ async def test_rewrite_prompt_prioritizes_spelling_correction_before_dropping_wo
     prompt = captured_prompt["question"]
     assert "spelling" in prompt.lower() or "typo" in prompt.lower()
     assert "drop" in prompt.lower()
+    assert " OR " in prompt
+    assert "unrelated" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_passes_through_an_or_joined_spelling_variant_query(monkeypatch):
+    """A single-word/proper-noun query has nothing to drop or broaden —
+    the rewrite should try alternate spellings, ideally combined with
+    Graph's KQL OR syntax into one query, rather than bolting on
+    unrelated words like "site" or "location". _llm_rewrite_query is
+    just a passthrough of whatever the LLM returns, so this confirms an
+    OR-joined rewrite reaches sharepoint.search unmangled."""
+    service = LangGraphRAGService()
+
+    async def fake_generate_answer(question, context):
+        return '"neilstown" OR "neillstown" OR "neilston"'
+
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+
+    result = await service._llm_rewrite_query("neilstown", ["neilstown"])
+
+    assert result == '"neilstown" OR "neillstown" OR "neilston"'
 
 
 @pytest.mark.asyncio
@@ -974,3 +996,230 @@ async def test_comparison_entity_that_succeeds_immediately_does_not_retry(monkey
     await service.answer_question(USER_A, "compare ronanstown and neilstown")
 
     assert len(search_calls) == 2  # one search per entity, no retries for either
+
+
+# --- citation filtering (only cite sources the answer actually used) ---
+
+
+@pytest.mark.asyncio
+async def test_citations_are_narrowed_to_documents_the_answer_actually_used(monkeypatch):
+    """Several documents can be retrieved, on-topic, and pass the
+    relevance check, while the composed answer only actually draws from
+    one of them. Citations shown to the user should reflect that, not
+    everything search happened to find."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    used_doc = SourceDocument(
+        document_id="doc-used",
+        document_name="USED.xlsx",
+        web_url="https://contoso.sharepoint.com/used.xlsx",
+        relevant_content="The actual fact the answer is based on.",
+    )
+    unused_doc = SourceDocument(
+        document_id="doc-unused",
+        document_name="UNUSED.xlsx",
+        web_url="https://contoso.sharepoint.com/unused.xlsx",
+        relevant_content="Something else entirely that wasn't used.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return [used_doc, unused_doc]
+
+    async def fake_evaluate_relevance(question, context):
+        return True
+
+    async def fake_generate_answer(question, context):
+        return "Based on the actual fact."
+
+    async def fake_select_used_citations(answer, candidates_block):
+        assert "doc-used" in candidates_block
+        assert "doc-unused" in candidates_block
+        return ["doc-used"]
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "select_used_citations", fake_select_used_citations)
+
+    response = await service.answer_question(USER_A, "what is the actual fact")
+
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "USED.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_citation_selection_failure_keeps_all_citations(monkeypatch):
+    """A flaky citation-selector call should never leave a real, grounded
+    answer with fewer (or zero) sources than it would have had without
+    the filtering feature at all — fail open."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    doc = SourceDocument(
+        document_id="doc-1",
+        document_name="DOC.xlsx",
+        web_url="https://contoso.sharepoint.com/doc.xlsx",
+        relevant_content="Some content.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return [doc]
+
+    async def fake_evaluate_relevance(question, context):
+        return True
+
+    async def fake_generate_answer(question, context):
+        return "An answer."
+
+    async def broken_select_used_citations(answer, candidates_block):
+        raise RuntimeError("Azure OpenAI had a bad day")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "select_used_citations", broken_select_used_citations)
+
+    response = await service.answer_question(USER_A, "what is in the doc")
+
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "DOC.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_citation_selection_returning_nothing_keeps_all_citations(monkeypatch):
+    """An empty selection result is more likely a parsing hiccup than a
+    genuine zero-citation grounded answer — don't show a real answer
+    with no sources over a filtering misfire."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    doc = SourceDocument(
+        document_id="doc-1",
+        document_name="DOC.xlsx",
+        web_url="https://contoso.sharepoint.com/doc.xlsx",
+        relevant_content="Some content.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return [doc]
+
+    async def fake_evaluate_relevance(question, context):
+        return True
+
+    async def fake_generate_answer(question, context):
+        return "An answer."
+
+    async def fake_select_used_citations(answer, candidates_block):
+        return []
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "select_used_citations", fake_select_used_citations)
+
+    response = await service.answer_question(USER_A, "what is in the doc")
+
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "DOC.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_clarification_reply_never_calls_citation_selection(monkeypatch):
+    """There's nothing to filter for a clarification reply — it already
+    always has zero citations, so the selector call would be a wasted
+    LLM round trip."""
+    service = LangGraphRAGService()
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context):
+        return "no relevant documents found"
+
+    async def fake_clarification(question, attempted_queries):
+        return "Could you share a document name or reference number?"
+
+    async def fail_if_called(answer, candidates_block):
+        raise AssertionError("select_used_citations should not be called with nothing to filter")
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+    monkeypatch.setattr(service.llm, "select_used_citations", fail_if_called)
+
+    response = await service.answer_question(USER_A, "something nobody has")
+
+    assert response.citations == []
+
+
+@pytest.mark.asyncio
+async def test_comparison_answer_citations_are_also_filtered(monkeypatch):
+    """The citation-filtering fix applies uniformly to comparison
+    answers, not just single-topic ones — a comparison's merged citation
+    list should also narrow to what the answer actually used."""
+    service = LangGraphRAGService()
+
+    from backend.models.documents import SourceDocument
+
+    ronanstown_doc = SourceDocument(
+        document_id="doc-ronanstown",
+        document_name="RONANSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/ronanstown.xlsx",
+        relevant_content="Site Name RONANSTOWN, GIS ID R-2.",
+    )
+    neilstown_doc = SourceDocument(
+        document_id="doc-neilstown",
+        document_name="NEILSTOWN.xlsx",
+        web_url="https://contoso.sharepoint.com/neilstown.xlsx",
+        relevant_content="Site Name NEILSTOWN, GIS ID N-1.",
+    )
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_classify_entities(question: str) -> EntityExtraction:
+        return EntityExtraction(is_comparison=True, entities=["ronanstown", "neilstown"])
+
+    async def fake_search(user, query, max_results=8):
+        return [ronanstown_doc] if "ronanstown" in query.lower() else [neilstown_doc]
+
+    async def fake_evaluate_relevance(question, context):
+        return True
+
+    async def fake_comparison_answer(question, context):
+        return "Ronanstown is R-2 (Neilstown had nothing comparable worth citing)."
+
+    async def fake_select_used_citations(answer, candidates_block):
+        return ["doc-ronanstown"]
+
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.llm, "classify_entities", fake_classify_entities)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "evaluate_relevance", fake_evaluate_relevance)
+    monkeypatch.setattr(service.llm, "generate_comparison_answer", fake_comparison_answer)
+    monkeypatch.setattr(service.llm, "select_used_citations", fake_select_used_citations)
+
+    response = await service.answer_question(USER_A, "compare ronanstown and neilstown")
+
+    assert len(response.citations) == 1
+    assert response.citations[0].document_name == "RONANSTOWN.xlsx"

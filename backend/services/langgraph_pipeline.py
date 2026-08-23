@@ -168,6 +168,12 @@ class RAGState(TypedDict):
     # an entity with zero results, instead of silently dropping it.
     entity_documents: dict[str, list[SourceDocument]]
     entity_found: dict[str, bool]
+    # The raw document list `citations` was built from in
+    # _decide_generation — kept separately so _filter_citations_to_used
+    # can ask the LLM which of them the composed answer actually drew
+    # from, and narrow citations to just those. Set alongside
+    # `citations` on every path that populates it.
+    citation_documents: list[SourceDocument]
 
 
 class LangGraphRAGService:
@@ -547,7 +553,7 @@ class LangGraphRAGService:
         straight to asking for more detail.
         """
         if not state["is_relevant"] and not state.get("best_context"):
-            return {"generation_mode": "clarification", "citations": []}
+            return {"generation_mode": "clarification", "citations": [], "citation_documents": []}
 
         if not state["is_relevant"]:
             # Retries exhausted, but an earlier attempt found something
@@ -578,6 +584,7 @@ class LangGraphRAGService:
             "generation_mode": "answer",
             "generation_context": context,
             "citations": citations,
+            "citation_documents": documents,
             "is_comparison": state.get("is_comparison", False),
         }
 
@@ -612,7 +619,9 @@ class LangGraphRAGService:
             answer = await self.llm.generate_answer(
                 question=state["question"], context=decision["generation_context"]
             )
-        citations = decision["citations"]
+        citations = await self._filter_citations_to_used(
+            answer, decision["citation_documents"], decision["citations"]
+        )
         logger.info(
             "[generate_answer] %d citation(s), answer_chars=%d, total_attempts=%d",
             len(citations),
@@ -649,11 +658,18 @@ class LangGraphRAGService:
             "what hasn't been tried yet in the list above:\n"
             "1. First, check every word for a possible spelling mistake "
             "or typo — especially proper nouns like place, site, or "
-            "document names — and correct it while keeping the rest of "
-            "the query the same. This is often the actual reason a "
-            "search returns nothing: the document exists, but the exact "
-            "word searched for is spelled slightly differently.\n"
-            "2. If a spelling-corrected version has already been tried "
+            "document names. If you are not certain of the exact correct "
+            "spelling, generate 2-4 plausible spelling variants of that "
+            "word and combine them into a single query using OR (e.g. "
+            '"neilstown" OR "neillstown" OR "neilston"), keeping the '
+            "rest of the query unchanged. Do not add unrelated extra "
+            'words (like "site" or "location") to try to fix a spelling '
+            "problem — that only narrows an already-failing search "
+            "further, it doesn't correct the spelling. This is often "
+            "the actual reason a search returns nothing: the document "
+            "exists, but the exact word searched for is spelled "
+            "slightly differently.\n"
+            "2. If a spelling-corrected/OR'd version has already been tried "
             "and still found nothing, drop the most specific or unusual "
             "word entirely (often the proper noun that might still be "
             "wrong or too narrow) and search on the more generic "
@@ -664,7 +680,14 @@ class LangGraphRAGService:
             "Respond with just the query, no explanation."
         )
         rewritten = await self.llm.generate_answer(question=prompt_context, context="")
-        rewritten = rewritten.strip().strip('"')
+        rewritten = rewritten.strip()
+        # Only strip accidental wrapping quotes around a single-phrase
+        # answer (e.g. `"pump specifications"` -> `pump specifications`).
+        # An OR-joined query's quotes are syntactically meaningful KQL
+        # phrase markers, not incidental wrapping — stripping them would
+        # mangle e.g. `"neilstown" OR "neillstown"` into a broken query.
+        if " OR " not in rewritten:
+            rewritten = rewritten.strip('"')
         return rewritten or previous_queries[-1]
 
     def _build_context(self, documents: list[SourceDocument]) -> str:
@@ -677,6 +700,34 @@ class LangGraphRAGService:
             parts.append(block)
             total_chars += len(block)
         return "\n\n".join(parts)
+
+    async def _filter_citations_to_used(
+        self, answer: str, documents: list[SourceDocument], citations: list[Citation]
+    ) -> list[Citation]:
+        """Narrow citations down to the documents the composed answer
+        actually drew from — search can legitimately return several
+        plausible candidates, but citing all of them regardless of
+        whether the answer used them misrepresents what the answer is
+        actually grounded in and can surface documents that turned out
+        to be irrelevant or simply wrong for this question.
+        """
+        if not documents or not citations:
+            return citations  # nothing to filter, and no LLM call worth making
+
+        candidates_block = "\n\n".join(
+            f"[id: {d.document_id}] {d.document_name}\n{d.relevant_content}" for d in documents
+        )
+        try:
+            used_ids = set(await self.llm.select_used_citations(answer, candidates_block))
+        except Exception:
+            logger.warning("Citation selection failed; keeping all citations", exc_info=True)
+            return citations  # fail open — never make the app worse than not filtering at all
+
+        filtered = [c for c in citations if c.document_id in used_ids]
+        # An empty result here is more likely a parsing hiccup than a
+        # genuinely zero-citation grounded answer — don't show a real
+        # answer with no sources over a filtering misfire.
+        return filtered or citations
 
     # --- public API --------------------------------------------------------
 
@@ -704,6 +755,7 @@ class LangGraphRAGService:
             "entities": [],
             "entity_documents": {},
             "entity_found": {},
+            "citation_documents": [],
         }
         final_state = await self.graph.ainvoke(
             initial_state, config={"recursion_limit": _RECURSION_LIMIT}
@@ -757,6 +809,7 @@ class LangGraphRAGService:
             "entities": [],
             "entity_documents": {},
             "entity_found": {},
+            "citation_documents": [],
         }
 
         final_state = initial_state
@@ -811,7 +864,11 @@ class LangGraphRAGService:
             async for delta in stream:
                 full_answer += delta
                 yield {"type": "token", "text": delta}
-            citations = final_state.get("citations", [])
+            citations = await self._filter_citations_to_used(
+                full_answer,
+                final_state.get("citation_documents", []),
+                final_state.get("citations", []),
+            )
 
         logger.info(
             "=== LangGraph stream end: attempts=%d citations=%d ===",
