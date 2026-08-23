@@ -3,11 +3,27 @@
 Credentials are read from environment variables server-side only (see
 backend/core/config.py) and are never returned to, or reachable from, the
 React frontend.
+
+The plain-text generation calls (generate_answer, streaming, conversational
+replies, clarification) go straight through the OpenAI SDK. The
+classification/evaluation/citation-selection calls instead go through
+pydantic_ai Agents (see the bottom of this file): they already needed a
+typed, validated response (IntentClassification, RelevanceEvaluation,
+EntityExtraction, CitationSelection), and pydantic_ai's output_type
+validates the model's tool-call arguments against those same Pydantic
+models and retries automatically on a malformed response, instead of us
+hand-parsing client.beta.chat.completions.parse() output. Every agent
+reuses the one AsyncAzureOpenAI client from _get_client() below, so
+Azure auth/config stays in one place.
 """
 from typing import AsyncIterator
 
 from openai import AsyncAzureOpenAI
 from pydantic import BaseModel
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import ModelSettings
 
 from backend.core.config import get_settings
 
@@ -114,6 +130,11 @@ class AzureOpenAIService:
     def __init__(self):
         self.settings = get_settings()
         self._client: AsyncAzureOpenAI | None = None
+        self._model: OpenAIModel | None = None
+        self._intent_agent: Agent[None, IntentClassification] | None = None
+        self._relevance_agent: Agent[None, RelevanceEvaluation] | None = None
+        self._entity_agent: Agent[None, EntityExtraction] | None = None
+        self._citation_agent: Agent[None, CitationSelection] | None = None
 
     def _get_client(self) -> AsyncAzureOpenAI:
         if self._client is None:
@@ -123,6 +144,52 @@ class AzureOpenAIService:
                 api_version=self.settings.AZURE_OPENAI_API_VERSION,
             )
         return self._client
+
+    def _get_model(self) -> OpenAIModel:
+        # Wraps the same AsyncAzureOpenAI client the plain-text methods use,
+        # so structured-output calls go through identical Azure auth/config.
+        if self._model is None:
+            self._model = OpenAIModel(
+                self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+                provider=OpenAIProvider(openai_client=self._get_client()),
+            )
+        return self._model
+
+    def _get_intent_agent(self) -> "Agent[None, IntentClassification]":
+        if self._intent_agent is None:
+            self._intent_agent = Agent(
+                self._get_model(),
+                output_type=IntentClassification,
+                instructions=INTENT_CLASSIFIER_SYSTEM_PROMPT,
+            )
+        return self._intent_agent
+
+    def _get_relevance_agent(self) -> "Agent[None, RelevanceEvaluation]":
+        if self._relevance_agent is None:
+            self._relevance_agent = Agent(
+                self._get_model(),
+                output_type=RelevanceEvaluation,
+                instructions=RELEVANCE_EVALUATOR_SYSTEM_PROMPT,
+            )
+        return self._relevance_agent
+
+    def _get_entity_agent(self) -> "Agent[None, EntityExtraction]":
+        if self._entity_agent is None:
+            self._entity_agent = Agent(
+                self._get_model(),
+                output_type=EntityExtraction,
+                instructions=ENTITY_EXTRACTOR_SYSTEM_PROMPT,
+            )
+        return self._entity_agent
+
+    def _get_citation_agent(self) -> "Agent[None, CitationSelection]":
+        if self._citation_agent is None:
+            self._citation_agent = Agent(
+                self._get_model(),
+                output_type=CitationSelection,
+                instructions=CITATION_SELECTOR_SYSTEM_PROMPT,
+            )
+        return self._citation_agent
 
     async def generate_answer(self, question: str, context: str) -> str:
         client = self._get_client()
@@ -269,17 +336,10 @@ class AzureOpenAIService:
         unnecessary search is a much smaller failure than silently
         refusing to look something up because a classifier had a weird day.
         """
-        client = self._get_client()
-        response = await client.beta.chat.completions.parse(
-            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
-            messages=[
-                {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-            response_format=IntentClassification,
+        result = await self._get_intent_agent().run(
+            question, model_settings=ModelSettings(temperature=0)
         )
-        return response.choices[0].message.parsed.needs_retrieval
+        return result.output.needs_retrieval
 
     async def classify_entities(self, question: str) -> EntityExtraction:
         """Does this question compare two or more distinct named things,
@@ -292,17 +352,10 @@ class AzureOpenAIService:
         classifier hiccup should just fall back to today's single-search
         behavior, never break the pipeline.
         """
-        client = self._get_client()
-        response = await client.beta.chat.completions.parse(
-            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
-            messages=[
-                {"role": "system", "content": ENTITY_EXTRACTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-            response_format=EntityExtraction,
+        result = await self._get_entity_agent().run(
+            question, model_settings=ModelSettings(temperature=0)
         )
-        return response.choices[0].message.parsed
+        return result.output
 
     async def select_used_citations(self, answer: str, candidates_block: str) -> list[str]:
         """Which of the retrieved documents did the already-written
@@ -316,20 +369,11 @@ class AzureOpenAIService:
         every citation" — a flaky or overly-strict filter call should
         never leave a real, grounded answer with zero sources.
         """
-        client = self._get_client()
-        response = await client.beta.chat.completions.parse(
-            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
-            messages=[
-                {"role": "system", "content": CITATION_SELECTOR_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Answer:\n{answer}\n\nCandidate documents:\n{candidates_block}",
-                },
-            ],
-            temperature=0,
-            response_format=CitationSelection,
+        result = await self._get_citation_agent().run(
+            f"Answer:\n{answer}\n\nCandidate documents:\n{candidates_block}",
+            model_settings=ModelSettings(temperature=0),
         )
-        return response.choices[0].message.parsed.used_document_ids
+        return result.output.used_document_ids
 
     async def evaluate_relevance(self, question: str, context: str) -> bool:
         """Does the retrieved context actually contain enough to answer
@@ -347,20 +391,11 @@ class AzureOpenAIService:
         if not context.strip():
             return False  # nothing to judge — skip the call entirely
 
-        client = self._get_client()
-        response = await client.beta.chat.completions.parse(
-            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
-            messages=[
-                {"role": "system", "content": RELEVANCE_EVALUATOR_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Question: {question}\n\nExcerpts:\n{context}",
-                },
-            ],
-            temperature=0,
-            response_format=RelevanceEvaluation,
+        result = await self._get_relevance_agent().run(
+            f"Question: {question}\n\nExcerpts:\n{context}",
+            model_settings=ModelSettings(temperature=0),
         )
-        return response.choices[0].message.parsed.is_relevant
+        return result.output.is_relevant
 
     async def embed(self, text: str) -> list[float]:
         client = self._get_client()

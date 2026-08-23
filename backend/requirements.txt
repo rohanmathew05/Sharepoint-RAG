@@ -1,11 +1,11 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-pydantic==2.9.2
+pydantic==2.10.6
 pydantic-settings==2.5.2
 httpx==0.27.2
 msal==1.31.0
 pyjwt==2.9.0
-openai==1.51.0
+openai==1.109.1
 python-dotenv==1.0.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
@@ -13,3 +13,8 @@ pytest-asyncio==0.24.0
 # Optional: V2 multi-step orchestration (see backend/services/langgraph_pipeline.py)
 langgraph==0.2.34
 langchain-core==0.3.9
+
+# Structured-output LLM calls (classification/evaluation/citation-selection)
+# in backend/services/azure_openai.py — see that file's module docstring.
+pydantic-ai-slim[openai]==0.6.0
+opentelemetry-api==1.33.0

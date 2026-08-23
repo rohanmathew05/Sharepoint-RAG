@@ -90,13 +90,17 @@ nothing to do with what was actually asked.
 
 The classification itself is a genuine (tiny) LLM call —
 `AzureOpenAIService.classify_needs_retrieval`, at `temperature=0` since
-it's a yes/no judgment call, not open-ended generation. It uses Azure
-OpenAI's structured outputs (`client.beta.chat.completions.parse(...,
-response_format=IntentClassification)`), so the verdict is a typed
-`needs_retrieval: bool` on a Pydantic model, not a word to
-substring-match — there's no ambiguous free-text response to interpret.
-Intent is a judgment call a classifier handles better than a fixed
-word-list ever could ("what's the deadline" vs. "what's up").
+it's a yes/no judgment call, not open-ended generation. It goes through a
+`pydantic_ai` `Agent` with `output_type=IntentClassification`, so the
+verdict is a typed `needs_retrieval: bool` on a Pydantic model, not a word
+to substring-match — pydantic_ai validates the model's tool-call output
+against that schema and retries automatically on a malformed response,
+so there's no ambiguous free-text response to interpret. Intent is a
+judgment call a classifier handles better than a fixed word-list ever
+could ("what's the deadline" vs. "what's up"). The other
+classification/evaluation/citation-selection calls
+(`classify_entities`, `evaluate_relevance`, `select_used_citations`) work
+the same way — see the module docstring in `backend/services/azure_openai.py`.
 
 If that call fails for any reason, `_classify_intent` falls back to
 `_is_chitchat`: an exact match against a small greeting/chitchat set,

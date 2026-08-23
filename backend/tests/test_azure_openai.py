@@ -1,9 +1,24 @@
 """Unit tests for AzureOpenAIService against a mocked Azure client — no
 real Azure OpenAI credentials or network access needed. This is the only
-path now that DEMO_MODE has been removed."""
+path now that DEMO_MODE has been removed.
+
+The classification/evaluation methods go through pydantic_ai Agents (see
+azure_openai.py), which call the same client.chat.completions.create()
+used for plain-text generation, but with a `tools` schema attached and
+expect the verdict back as a tool call rather than a `response_format`
+parse — so FakeAzureClient simulates that tool-call response shape
+whenever a call includes `tools`, using real openai.types.chat objects
+since pydantic_ai validates the response type strictly.
+"""
 from types import SimpleNamespace
 
 import pytest
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_tool_call import (
+    ChatCompletionMessageToolCall,
+    Function,
+)
 
 from backend.services.azure_openai import (
     SYSTEM_PROMPT,
@@ -21,28 +36,48 @@ class FakeAzureClient:
         parsed=None,
     ):
         self.last_chat_kwargs: dict | None = None
-        self.last_parse_kwargs: dict | None = None
         self._chat_content = chat_content
         self._embedding = embedding or [0.1, 0.2, 0.3]
         self._parsed = parsed
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat))
         self.embeddings = SimpleNamespace(create=self._create_embedding)
-        self.beta = SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(parse=self._parse_chat))
-        )
 
     async def _create_chat(self, **kwargs):
         self.last_chat_kwargs = kwargs
+        tools = kwargs.get("tools")
+        if tools:
+            tool_name = tools[0]["function"]["name"]
+            return ChatCompletion(
+                id="chatcmpl-test",
+                object="chat.completion",
+                created=0,
+                model="test-deployment",
+                choices=[
+                    Choice(
+                        index=0,
+                        finish_reason="tool_calls",
+                        message=ChatCompletionMessage(
+                            role="assistant",
+                            content=None,
+                            tool_calls=[
+                                ChatCompletionMessageToolCall(
+                                    id="call_1",
+                                    type="function",
+                                    function=Function(
+                                        name=tool_name,
+                                        arguments=self._parsed.model_dump_json(),
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ],
+            )
         message = SimpleNamespace(content=self._chat_content)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
     async def _create_embedding(self, **kwargs):
         return SimpleNamespace(data=[SimpleNamespace(embedding=self._embedding)])
-
-    async def _parse_chat(self, **kwargs):
-        self.last_parse_kwargs = kwargs
-        message = SimpleNamespace(parsed=self._parsed)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 @pytest.mark.asyncio
@@ -90,8 +125,11 @@ async def test_classify_needs_retrieval_true_for_search_verdict(monkeypatch):
     monkeypatch.setattr(service, "_get_client", lambda: fake_client)
 
     assert await service.classify_needs_retrieval("What PPE is required?") is True
-    assert fake_client.last_parse_kwargs["temperature"] == 0
-    assert fake_client.last_parse_kwargs["response_format"] is IntentClassification
+    assert fake_client.last_chat_kwargs["temperature"] == 0
+    schema_properties = fake_client.last_chat_kwargs["tools"][0]["function"]["parameters"][
+        "properties"
+    ]
+    assert "needs_retrieval" in schema_properties
 
 
 @pytest.mark.asyncio
@@ -111,7 +149,7 @@ async def test_evaluate_relevance_skips_api_call_for_empty_context(monkeypatch):
 
     result = await service.evaluate_relevance("question", "")
     assert result is False
-    assert fake_client.last_parse_kwargs is None  # never called the API
+    assert fake_client.last_chat_kwargs is None  # never called the API
 
 
 @pytest.mark.asyncio
@@ -122,7 +160,10 @@ async def test_evaluate_relevance_true_for_relevant_verdict(monkeypatch):
 
     result = await service.evaluate_relevance("What is the GIS ID?", "[doc] some excerpt")
     assert result is True
-    assert fake_client.last_parse_kwargs["response_format"] is RelevanceEvaluation
+    schema_properties = fake_client.last_chat_kwargs["tools"][0]["function"]["parameters"][
+        "properties"
+    ]
+    assert "is_relevant" in schema_properties
 
 
 @pytest.mark.asyncio
