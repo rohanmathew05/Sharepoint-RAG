@@ -50,7 +50,7 @@ from langgraph.graph import END, StateGraph
 
 from backend.core.config import get_settings
 from backend.models.auth import UserContext
-from backend.models.chat import ChatResponse, ReasoningStep
+from backend.models.chat import ChatMessage, ChatResponse, ReasoningStep
 from backend.models.documents import Citation, SourceDocument
 from backend.services.azure_openai import AzureOpenAIService
 from backend.services.sharepoint import SharePointService
@@ -121,6 +121,12 @@ def _looks_like_comparison(question: str) -> bool:
 class RAGState(TypedDict):
     question: str
     user: UserContext
+    # Prior turns of this conversation, already capped to
+    # Settings.MAX_HISTORY_MESSAGES by the caller — only threaded into the
+    # final-answer generation calls (conversational/clarification/answer/
+    # comparison), not into retrieval-decision or query-rewrite nodes; see
+    # LangGraphRAGService's docstring for why that's a known limitation.
+    conversation_history: list[ChatMessage]
     search_query: str
     needs_retrieval: bool
     documents: list[SourceDocument]
@@ -304,7 +310,9 @@ class LangGraphRAGService:
     async def _answer_conversationally(self, state: RAGState) -> dict:
         prepared = await self._prepare_conversational(state)
         try:
-            answer = await self.llm.generate_conversational_reply(state["question"])
+            answer = await self.llm.generate_conversational_reply(
+                state["question"], history=state.get("conversation_history")
+            )
         except Exception:
             logger.warning("Conversational reply generation failed; using fallback", exc_info=True)
             answer = _FALLBACK_CHITCHAT_REPLY
@@ -596,10 +604,12 @@ class LangGraphRAGService:
         step = self._step("compose", "Composing the answer")
         reasoning_steps = state["reasoning_steps"] + [step]
 
+        history = state.get("conversation_history")
+
         if decision["generation_mode"] == "clarification":
             try:
                 answer = await self.llm.generate_clarification(
-                    state["question"], state["previous_queries"]
+                    state["question"], state["previous_queries"], history=history
                 )
             except Exception:
                 logger.warning("Clarification generation failed; using fallback", exc_info=True)
@@ -613,11 +623,11 @@ class LangGraphRAGService:
 
         if decision["is_comparison"]:
             answer = await self.llm.generate_comparison_answer(
-                question=state["question"], context=decision["generation_context"]
+                question=state["question"], context=decision["generation_context"], history=history
             )
         else:
             answer = await self.llm.generate_answer(
-                question=state["question"], context=decision["generation_context"]
+                question=state["question"], context=decision["generation_context"], history=history
             )
         citations = await self._filter_citations_to_used(
             answer, decision["citation_documents"], decision["citations"]
@@ -731,11 +741,14 @@ class LangGraphRAGService:
 
     # --- public API --------------------------------------------------------
 
-    async def answer_question(self, user: UserContext, question: str) -> ChatResponse:
+    async def answer_question(
+        self, user: UserContext, question: str, history: list[ChatMessage] | None = None
+    ) -> ChatResponse:
         logger.info("=== LangGraph run start: user=%s question=%r ===", user.upn, question)
         initial_state: RAGState = {
             "question": question,
             "user": user,
+            "conversation_history": history or [],
             "search_query": question,
             "needs_retrieval": True,
             "documents": [],
@@ -773,7 +786,9 @@ class LangGraphRAGService:
             reasoning_steps=[ReasoningStep(**s) for s in final_state["reasoning_steps"]],
         )
 
-    async def stream_answer(self, user: UserContext, question: str) -> AsyncIterator[dict]:
+    async def stream_answer(
+        self, user: UserContext, question: str, history: list[ChatMessage] | None = None
+    ) -> AsyncIterator[dict]:
         """Same pipeline as answer_question, but yields events as they
         happen instead of returning one ChatResponse at the end:
         {"type": "step", "step": {...}} as each pipeline stage completes,
@@ -790,6 +805,7 @@ class LangGraphRAGService:
         initial_state: RAGState = {
             "question": question,
             "user": user,
+            "conversation_history": history or [],
             "search_query": question,
             "needs_retrieval": True,
             "documents": [],
@@ -827,10 +843,13 @@ class LangGraphRAGService:
         yield {"type": "step", "step": compose_step}
 
         mode = final_state.get("generation_mode")
+        history = final_state.get("conversation_history")
         full_answer = ""
         if mode == "conversational":
             try:
-                async for delta in self.llm.generate_conversational_reply_stream(question):
+                async for delta in self.llm.generate_conversational_reply_stream(
+                    question, history=history
+                ):
                     full_answer += delta
                     yield {"type": "token", "text": delta}
             except Exception:
@@ -844,7 +863,7 @@ class LangGraphRAGService:
         elif mode == "clarification":
             try:
                 async for delta in self.llm.generate_clarification_stream(
-                    question, final_state["previous_queries"]
+                    question, final_state["previous_queries"], history=history
                 ):
                     full_answer += delta
                     yield {"type": "token", "text": delta}
@@ -857,9 +876,9 @@ class LangGraphRAGService:
         else:
             context = final_state.get("generation_context", "")
             stream = (
-                self.llm.generate_comparison_answer_stream(question, context)
+                self.llm.generate_comparison_answer_stream(question, context, history=history)
                 if final_state.get("is_comparison")
-                else self.llm.generate_answer_stream(question, context)
+                else self.llm.generate_answer_stream(question, context, history=history)
             )
             async for delta in stream:
                 full_answer += delta

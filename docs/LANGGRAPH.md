@@ -187,11 +187,18 @@ truly-nothing-found path, and
 "earlier attempt found something, later one didn't" recovery path — both
 in `backend/tests/test_langgraph_pipeline.py`.
 
-Follow-up question handling and tool calling are natural next steps on
-this same graph (e.g. a `conversation_history`-aware `analyze_query`
-node, or a `tool` node for structured lookups) but aren't required for
-the current permission-aware retrieval demo, so they're left out to keep
-the graph's purpose — better retrieval, not a bigger tech list — clear.
+Conversations are persisted server-side (SQLite, behind the
+`ConversationStore` interface in `backend/services/storage/`) and prior
+turns are threaded into `RAGState["conversation_history"]` — but only into
+the final-answer generation calls (`_answer_conversationally`,
+`_generate_answer`/`_prepare_generation`'s clarification/answer/comparison
+branches), not into `analyze_query`, `classify_intent`, or the
+query-rewrite loop. A follow-up like "what about its budget?" gets a
+conversationally-aware *answer*, but retrieval itself still searches on
+the raw question text, so pronoun/reference resolution *for search* isn't
+solved yet — that, plus tool calling, is a natural next step on this same
+graph, left out for now to keep this pass scoped to generation-time
+context.
 
 ## Why this doesn't change the security model
 

@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatStreamEvent } from "../types";
+import type { ChatMessage, ChatStreamEvent, ConversationDetail, ConversationSummary } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
@@ -34,12 +34,14 @@ const CHAT_STREAM_ENDPOINT = `${API_BASE}/chat/v2/stream`;
 export async function streamChatMessage(
   question: string,
   history: ChatMessage[],
+  conversationId: string | null,
   getToken: () => Promise<string>,
   onEvent: (event: ChatStreamEvent) => void
 ): Promise<void> {
   const body = JSON.stringify({
     question,
     conversation_history: history.map((m) => ({ role: m.role, content: m.content })),
+    conversation_id: conversationId,
   });
 
   const attempt = async () => {
@@ -91,4 +93,52 @@ export async function streamChatMessage(
 
   const rest = buffer.trim();
   if (rest) onEvent(JSON.parse(rest) as ChatStreamEvent);
+}
+
+const CONVERSATIONS_ENDPOINT = `${API_BASE}/conversations`;
+
+async function jsonRequest<T>(
+  url: string,
+  init: RequestInit,
+  getToken: () => Promise<string>
+): Promise<T> {
+  const headers = { ...(await authHeaders(getToken)), ...(init.headers ?? {}) };
+  const res = await fetch(url, { ...init, headers });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(errorBody.detail ?? `Request failed with ${res.status}`, errorBody.error_code);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+export function listConversations(getToken: () => Promise<string>): Promise<ConversationSummary[]> {
+  return jsonRequest(CONVERSATIONS_ENDPOINT, { method: "GET" }, getToken);
+}
+
+export function createConversation(getToken: () => Promise<string>): Promise<{ id: string }> {
+  return jsonRequest(CONVERSATIONS_ENDPOINT, { method: "POST" }, getToken);
+}
+
+export function getConversation(
+  id: string,
+  getToken: () => Promise<string>
+): Promise<ConversationDetail> {
+  return jsonRequest(`${CONVERSATIONS_ENDPOINT}/${id}`, { method: "GET" }, getToken);
+}
+
+export function renameConversation(
+  id: string,
+  title: string,
+  getToken: () => Promise<string>
+): Promise<ConversationSummary> {
+  return jsonRequest(
+    `${CONVERSATIONS_ENDPOINT}/${id}`,
+    { method: "PATCH", body: JSON.stringify({ title }) },
+    getToken
+  );
+}
+
+export function deleteConversation(id: string, getToken: () => Promise<string>): Promise<void> {
+  return jsonRequest(`${CONVERSATIONS_ENDPOINT}/${id}`, { method: "DELETE" }, getToken);
 }

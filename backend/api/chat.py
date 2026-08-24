@@ -1,4 +1,6 @@
-"""Chat endpoint: the main RAG entry point used by the frontend."""
+"""Chat endpoint (V1, non-streaming). The frontend only calls
+/api/chat/v2/stream (see chat_v2.py) — this endpoint doesn't persist
+messages or participate in conversation history."""
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.auth.entra import get_current_user

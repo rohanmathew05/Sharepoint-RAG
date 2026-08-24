@@ -6,10 +6,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.api import auth, chat, chat_v2, search
+from backend.api import auth, chat, chat_v2, conversations, search
 from backend.auth.obo import OBOExchangeError, OBOTokenExpiredError
 from backend.core.config import get_settings
 from backend.services.graph import GraphAPIError
+from backend.services.storage import get_conversation_store
 
 # uvicorn configures its own loggers (uvicorn.*) but not the root logger,
 # so app-level `logging.getLogger(__name__)` calls (e.g. in
@@ -44,7 +45,16 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(chat_v2.router)
+app.include_router(conversations.router)
 app.include_router(search.router)
+
+
+@app.on_event("startup")
+async def _init_conversation_store() -> None:
+    # Forces the SQLite file/schema to exist before the first request
+    # rather than lazily on the first chat message, so that request isn't
+    # slower/racier than the rest.
+    get_conversation_store()
 
 
 @app.exception_handler(OBOTokenExpiredError)

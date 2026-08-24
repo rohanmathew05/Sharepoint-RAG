@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import {
   AuthenticatedTemplate,
@@ -6,12 +6,17 @@ import {
   useMsal,
 } from "@azure/msal-react";
 import { ChatWindow } from "./components/ChatWindow";
+import { ConversationSidebar } from "./components/ConversationSidebar";
+import { deleteConversation, listConversations, renameConversation } from "./api/client";
 import { loginRequest } from "./authConfig";
 import { clearAuthError, getLatestAuthError, subscribeAuthError } from "./authEvents";
+import type { ConversationSummary } from "./types";
 
 function AuthenticatedApp() {
   const { instance, accounts } = useMsal();
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
 
   async function getToken(): Promise<string> {
     const account = accounts[0];
@@ -30,29 +35,66 @@ function AuthenticatedApp() {
     }
   }
 
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await listConversations(getToken));
+    } catch {
+      // Sidebar list is a convenience, not the source of truth for the
+      // active conversation — a failed refresh just leaves the list
+      // stale until the next successful one, rather than blocking chat.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    refreshConversations();
+  }, [refreshConversations]);
+
+  async function handleDeleteConversation(id: string) {
+    await deleteConversation(id, getToken);
+    if (id === currentConversationId) setCurrentConversationId(null);
+    await refreshConversations();
+  }
+
+  async function handleRenameConversation(id: string, title: string) {
+    // Update local state immediately rather than waiting on a full
+    // refetch — renaming is the one action where the round-trip delay
+    // would otherwise be visible as the typed title flashing back to
+    // the old one for a moment.
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+    try {
+      await renameConversation(id, title, getToken);
+    } catch {
+      await refreshConversations(); // roll back to the real state on failure
+    }
+  }
+
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="flex items-center justify-between border-b border-border bg-surface px-6 py-3">
-        <h1 className="m-0 text-lg font-semibold text-foreground">AI Assistant</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-foreground">
-            {accounts[0]?.name}
-            {accounts[0]?.username && (
-              <span className="ml-1 font-normal text-muted-foreground">
-                ({accounts[0].username})
-              </span>
-            )}
-          </span>
-          <button
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover"
-            onClick={() => instance.logoutRedirect()}
-          >
-            Sign out
-          </button>
+      <main className="flex flex-1 overflow-hidden">
+        <ConversationSidebar
+          conversations={conversations}
+          activeId={currentConversationId}
+          onSelect={setCurrentConversationId}
+          onNew={() => setCurrentConversationId(null)}
+          onDelete={handleDeleteConversation}
+          onRename={handleRenameConversation}
+          userName={accounts[0]?.name}
+          userEmail={accounts[0]?.username}
+          onSignOut={() => instance.logoutRedirect()}
+        />
+        <div className="flex-1 overflow-hidden">
+          <ChatWindow
+            getToken={getToken}
+            onSessionExpired={() => setSessionExpired(true)}
+            conversationId={currentConversationId}
+            onConversationCreated={(id) => {
+              setCurrentConversationId(id);
+              refreshConversations();
+            }}
+            onConversationUpdated={refreshConversations}
+          />
         </div>
-      </header>
-      <main className="flex-1 overflow-hidden">
-        <ChatWindow getToken={getToken} onSessionExpired={() => setSessionExpired(true)} />
       </main>
       {sessionExpired && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">

@@ -29,6 +29,7 @@ export interface ChatResponse {
   citations: Citation[];
   retrieval_attempts: number;
   reasoning_steps: ReasoningStep[];
+  conversation_id: string;
 }
 
 // Events sent by POST /api/chat/v2/stream, one JSON object per line
@@ -36,6 +37,7 @@ export interface ChatResponse {
 // why: EventSource can't carry an Authorization header, and this needs
 // the caller's MSAL bearer token).
 export type ChatStreamEvent =
+  | { type: "conversation"; id: string }
   | { type: "step"; step: ReasoningStep }
   | { type: "token"; text: string }
   | {
@@ -43,5 +45,17 @@ export type ChatStreamEvent =
       answer: string;
       citations: Citation[];
       retrieval_attempts: number;
+      conversation_id: string;
     }
   | { type: "error"; error_code: string | null; detail: string };
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ChatMessage[];
+}

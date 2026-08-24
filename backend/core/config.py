@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     # (e.g. "Center" vs "Centre") without needing to guess right first try.
     MAX_RETRIES_PER_ENTITY: int = 4
 
+    # --- Conversation history ---
+    # Resolved relative to backend/ (same convention as _ENV_FILE above) so
+    # the app finds its DB regardless of the process's launch cwd.
+    CHAT_DB_PATH: str = str(Path(__file__).resolve().parent.parent / "data" / "app.db")
+    # Caps how many prior messages get sent to the LLM as context on a
+    # follow-up question — bounds prompt size on a long-running conversation
+    # rather than growing without limit.
+    MAX_HISTORY_MESSAGES: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:
