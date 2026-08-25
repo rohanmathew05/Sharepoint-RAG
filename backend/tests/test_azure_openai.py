@@ -10,6 +10,7 @@ from backend.services.azure_openai import (
     SYSTEM_PROMPT,
     AzureOpenAIService,
     IntentClassification,
+    QueryContextualization,
     RelevanceEvaluation,
 )
 
@@ -178,6 +179,41 @@ async def test_generate_conversational_reply_calls_the_llm(monkeypatch):
     assert reply == "Hey! Ask me about the SharePoint docs anytime."
     messages = fake_client.last_chat_kwargs["messages"]
     assert messages[1] == {"role": "user", "content": "good morning!"}
+
+
+@pytest.mark.asyncio
+async def test_contextualize_query_skips_api_call_with_no_history(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(
+        parsed=QueryContextualization(standalone_query="should never be used")
+    )
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    result = await service.contextualize_query("could you find more details")
+
+    assert result == "could you find more details"
+    assert fake_client.last_parse_kwargs is None  # never called the API
+
+
+@pytest.mark.asyncio
+async def test_contextualize_query_resolves_a_vague_follow_up_using_history(monkeypatch):
+    service = AzureOpenAIService()
+    fake_client = FakeAzureClient(
+        parsed=QueryContextualization(standalone_query="Neilstown Ronanstown details")
+    )
+    monkeypatch.setattr(service, "_get_client", lambda: fake_client)
+
+    history = [
+        ChatMessage(role="user", content="compare neilstown and ronanstown for me"),
+        ChatMessage(role="assistant", content="Neilstown scored 61.78, Ronanstown 61.22..."),
+    ]
+    result = await service.contextualize_query("could you find more details", history=history)
+
+    assert result == "Neilstown Ronanstown details"
+    messages = fake_client.last_parse_kwargs["messages"]
+    assert messages[1] == {"role": "user", "content": "compare neilstown and ronanstown for me"}
+    assert messages[-1] == {"role": "user", "content": "could you find more details"}
+    assert fake_client.last_parse_kwargs["response_format"] is QueryContextualization
 
 
 @pytest.mark.asyncio

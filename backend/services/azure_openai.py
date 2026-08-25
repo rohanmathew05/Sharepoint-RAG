@@ -37,6 +37,22 @@ RELEVANCE_EVALUATOR_SYSTEM_PROMPT = (
     "relevant."
 )
 
+QUERY_CONTEXTUALIZER_SYSTEM_PROMPT = (
+    "You rewrite a user's latest message into a standalone SharePoint "
+    "search query, using the prior conversation turns to resolve anything "
+    "that only makes sense in context — pronouns ('it', 'that', 'those'), "
+    "vague follow-ups ('more details', 'what about the other one', 'and "
+    "the second one'), or an implied subject the message never names. "
+    "Look at the conversation history to identify the actual topic(s) "
+    "being discussed and combine them with what the latest message is "
+    "actually asking for. If the latest message is already a complete, "
+    "self-contained question that doesn't depend on the prior turns, "
+    "return it unchanged, word for word. Keep the result short and "
+    "keyword-focused, like something typed into a search box — not a "
+    "full grammatical sentence. Do not answer the question yourself, and "
+    "do not add any fact that wasn't mentioned in the conversation."
+)
+
 CONVERSATIONAL_SYSTEM_PROMPT = (
     "You are an internal company AI assistant that answers questions about "
     "the company's SharePoint documents. The user just sent a greeting, "
@@ -105,6 +121,10 @@ class RelevanceEvaluation(BaseModel):
 class EntityExtraction(BaseModel):
     is_comparison: bool
     entities: list[str]
+
+
+class QueryContextualization(BaseModel):
+    standalone_query: str
 
 
 class CitationSelection(BaseModel):
@@ -317,6 +337,35 @@ class AzureOpenAIService:
             response_format=IntentClassification,
         )
         return response.choices[0].message.parsed.needs_retrieval
+
+    async def contextualize_query(
+        self, question: str, history: list[ChatMessage] | None = None
+    ) -> str:
+        """Resolves a follow-up message ("could you find more details")
+        into a standalone search query using prior conversation turns,
+        before it is ever sent to SharePoint search or the intent/entity
+        classifiers. Returns the question unchanged (word for word) when
+        it is already self-contained — this is a resolver, not a
+        paraphraser.
+
+        Callers should fall back to the raw question if this call
+        raises — an unresolved follow-up (today's behavior) is a smaller
+        failure than breaking the pipeline on a classifier hiccup.
+        """
+        if not history:
+            return question.strip()
+        client = self._get_client()
+        response = await client.beta.chat.completions.parse(
+            model=self.settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": QUERY_CONTEXTUALIZER_SYSTEM_PROMPT},
+                *self._history_messages(history),
+                {"role": "user", "content": question},
+            ],
+            temperature=0,
+            response_format=QueryContextualization,
+        )
+        return response.choices[0].message.parsed.standalone_query
 
     async def classify_entities(self, question: str) -> EntityExtraction:
         """Does this question compare two or more distinct named things,

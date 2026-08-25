@@ -122,11 +122,17 @@ class RAGState(TypedDict):
     question: str
     user: UserContext
     # Prior turns of this conversation, already capped to
-    # Settings.MAX_HISTORY_MESSAGES by the caller — only threaded into the
+    # Settings.MAX_HISTORY_MESSAGES by the caller. Used both to resolve a
+    # vague follow-up into a standalone search query (see _analyze_query /
+    # AzureOpenAIService.contextualize_query) and to phrase the
     # final-answer generation calls (conversational/clarification/answer/
-    # comparison), not into retrieval-decision or query-rewrite nodes; see
-    # LangGraphRAGService's docstring for why that's a known limitation.
+    # comparison).
     conversation_history: list[ChatMessage]
+    # The result of resolving `question` against `conversation_history`
+    # into a standalone query, computed once in _analyze_query. Stays
+    # fixed as the retry baseline through the whole rewrite loop, unlike
+    # `search_query` which changes on every retry.
+    contextualized_question: str
     search_query: str
     needs_retrieval: bool
     documents: list[SourceDocument]
@@ -245,14 +251,37 @@ class LangGraphRAGService:
 
     async def _analyze_query(self, state: RAGState) -> dict:
         question = state["question"]
+        history = state.get("conversation_history")
         logger.info("[analyze_query] question=%r", question)
-        step = self._step("understand", "Understanding the question")
+        steps = [self._step("understand", "Understanding the question")]
+
+        # Resolve a vague follow-up ("could you find more details") into a
+        # standalone search query before anything else runs — otherwise it
+        # gets searched against SharePoint verbatim and classified/entity-
+        # extracted in isolation, with no idea what "more details" refers
+        # to. Only attempted when there's history to resolve against; on a
+        # conversation's first turn this is a no-op cost-free skip.
+        contextualized_question = question.strip()
+        if history:
+            try:
+                contextualized_question = await self.llm.contextualize_query(question, history)
+                contextualized_question = contextualized_question.strip() or question.strip()
+            except Exception:
+                logger.warning("Query contextualization failed; using raw question", exc_info=True)
+                contextualized_question = question.strip()
+            if contextualized_question != question.strip():
+                steps.append(self._step(
+                    "context",
+                    "Using conversation context",
+                    f'Interpreted as: "{contextualized_question}"',
+                ))
+        logger.info("[analyze_query] contextualized_question=%r", contextualized_question)
 
         is_comparison = False
         entities: list[str] = []
-        if _looks_like_comparison(question):
+        if _looks_like_comparison(contextualized_question):
             try:
-                extraction = await self.llm.classify_entities(question)
+                extraction = await self.llm.classify_entities(contextualized_question)
                 if extraction.is_comparison and len(extraction.entities) >= 2:
                     is_comparison = True
                     entities = extraction.entities
@@ -261,11 +290,12 @@ class LangGraphRAGService:
         logger.info("[analyze_query] is_comparison=%s entities=%s", is_comparison, entities)
 
         return {
-            "search_query": question.strip(),
+            "search_query": contextualized_question,
+            "contextualized_question": contextualized_question,
             "retrieval_attempts": 0,
             "is_comparison": is_comparison,
             "entities": entities,
-            "reasoning_steps": state["reasoning_steps"] + [step],
+            "reasoning_steps": state["reasoning_steps"] + steps,
         }
 
     async def _classify_intent(self, state: RAGState) -> dict:
@@ -277,7 +307,12 @@ class LangGraphRAGService:
         # actually asked. This is a real (cheap, capped) LLM call rather
         # than a fixed word-list, since intent is a judgment call a
         # classifier handles better than an exact match ever could.
-        question = state["question"]
+        #
+        # Uses the contextualized question (from _analyze_query), not the
+        # raw message — a vague follow-up like "could you find more
+        # details" has to be resolved against conversation history first,
+        # or it risks being misjudged as chitchat in isolation.
+        question = state.get("contextualized_question") or state["question"]
         try:
             needs_retrieval = await self.llm.classify_needs_retrieval(question)
         except Exception:
@@ -411,7 +446,15 @@ class LangGraphRAGService:
         return route
 
     async def _rewrite_query(self, state: RAGState) -> dict:
-        rewritten = await self._llm_rewrite_query(state["question"], state["previous_queries"])
+        # Rewrite against the contextualized baseline, not the raw
+        # (possibly vague) `state["question"]` — a follow-up like "could
+        # you find more details" has no meaning to rewrite against on its
+        # own. History is passed on every retry too, not just the first
+        # attempt, so later rewrites keep the same conversational grounding.
+        baseline_question = state.get("contextualized_question") or state["question"]
+        rewritten = await self._llm_rewrite_query(
+            baseline_question, state["previous_queries"], history=state.get("conversation_history")
+        )
         logger.info("[rewrite_query] %r -> %r", state["search_query"], rewritten)
         return {"search_query": rewritten}
 
@@ -642,7 +685,12 @@ class LangGraphRAGService:
 
     # --- helpers -----------------------------------------------------------
 
-    async def _llm_rewrite_query(self, original_question: str, previous_queries: list[str]) -> str:
+    async def _llm_rewrite_query(
+        self,
+        original_question: str,
+        previous_queries: list[str],
+        history: list[ChatMessage] | None = None,
+    ) -> str:
         # Ask Azure OpenAI for a search query genuinely different from
         # every attempt so far — not just the last one. Without the full
         # history, a rewrite has no memory of what it already tried and
@@ -689,7 +737,7 @@ class LangGraphRAGService:
             "match the document's exact wording.\n"
             "Respond with just the query, no explanation."
         )
-        rewritten = await self.llm.generate_answer(question=prompt_context, context="")
+        rewritten = await self.llm.generate_answer(question=prompt_context, context="", history=history)
         rewritten = rewritten.strip()
         # Only strip accidental wrapping quotes around a single-phrase
         # answer (e.g. `"pump specifications"` -> `pump specifications`).
@@ -749,6 +797,7 @@ class LangGraphRAGService:
             "question": question,
             "user": user,
             "conversation_history": history or [],
+            "contextualized_question": question,
             "search_query": question,
             "needs_retrieval": True,
             "documents": [],
@@ -806,6 +855,7 @@ class LangGraphRAGService:
             "question": question,
             "user": user,
             "conversation_history": history or [],
+            "contextualized_question": question,
             "search_query": question,
             "needs_retrieval": True,
             "documents": [],

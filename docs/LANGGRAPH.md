@@ -189,16 +189,18 @@ in `backend/tests/test_langgraph_pipeline.py`.
 
 Conversations are persisted server-side (SQLite, behind the
 `ConversationStore` interface in `backend/services/storage/`) and prior
-turns are threaded into `RAGState["conversation_history"]` — but only into
-the final-answer generation calls (`_answer_conversationally`,
-`_generate_answer`/`_prepare_generation`'s clarification/answer/comparison
-branches), not into `analyze_query`, `classify_intent`, or the
-query-rewrite loop. A follow-up like "what about its budget?" gets a
-conversationally-aware *answer*, but retrieval itself still searches on
-the raw question text, so pronoun/reference resolution *for search* isn't
-solved yet — that, plus tool calling, is a natural next step on this same
-graph, left out for now to keep this pass scoped to generation-time
-context.
+turns are threaded into `RAGState["conversation_history"]`. `analyze_query`
+uses it first: `AzureOpenAIService.contextualize_query` resolves the raw
+message against the conversation history into a standalone search query
+(e.g. a bare follow-up like "could you find more details" becomes
+"Neilstown Ronanstown details") before anything else runs, and that
+resolved question — not the raw message — is what `classify_intent`, the
+comparison entity extraction, and every `rewrite_query` retry reason over.
+History is also passed into every rewrite attempt, not just the first, and
+still flows into the final-answer generation calls
+(`_answer_conversationally`, `_generate_answer`/`_prepare_generation`'s
+clarification/answer/comparison branches) as before, so both retrieval and
+the final answer share the same conversational grounding.
 
 ## Why this doesn't change the security model
 

@@ -164,7 +164,7 @@ async def test_empty_first_search_triggers_rewrite_and_retry(monkeypatch):
     async def fake_generate_answer(question, context, history=None):
         return "Based on the documents: Model P-450."
 
-    async def fake_rewrite(original_question, previous_queries):
+    async def fake_rewrite(original_question, previous_queries, history=None):
         return "pump specifications"
 
     async def fake_evaluate_relevance(question, context):
@@ -218,7 +218,7 @@ async def test_llm_relevance_check_triggers_retry_on_unhelpful_snippet(monkeypat
     async def fake_generate_answer(question, context, history=None):
         return "The GIS ID reference is WFV0002188."
 
-    async def fake_rewrite(original_question, previous_queries):
+    async def fake_rewrite(original_question, previous_queries, history=None):
         return "GIS ID reference Tullylost"
 
     monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
@@ -249,7 +249,7 @@ async def test_retries_are_capped_by_max_retries(monkeypatch):
     async def fake_generate_answer(question, context, history=None):
         return "no relevant documents found"
 
-    async def fake_rewrite(original_question, previous_queries):
+    async def fake_rewrite(original_question, previous_queries, history=None):
         return f"{previous_queries[-1]} broader"
 
     async def fake_clarification(question, attempted_queries, history=None):
@@ -287,7 +287,7 @@ async def test_exhausted_retries_use_llm_generated_clarification(monkeypatch):
     async def fake_search(user, query, max_results=8):
         return []  # never finds anything
 
-    async def fake_rewrite(original_question, previous_queries):
+    async def fake_rewrite(original_question, previous_queries, history=None):
         return f"{previous_queries[-1]} broader"
 
     async def fake_clarification(question, attempted_queries, history=None):
@@ -346,7 +346,7 @@ async def test_exhausted_retries_fall_back_to_best_attempt_content(monkeypatch):
     async def fake_evaluate_relevance(question, context):
         return False  # ...and gets marked not-relevant every time
 
-    async def fake_rewrite(original_question, previous_queries):
+    async def fake_rewrite(original_question, previous_queries, history=None):
         return f"{previous_queries[-1]} broader"
 
     async def fake_generate_answer(question, context, history=None):
@@ -391,6 +391,86 @@ async def test_chitchat_reply_is_llm_generated(monkeypatch):
 
     assert response.answer == "Good morning! Happy to help you find anything in the SharePoint docs."
     assert response.citations == []
+
+
+@pytest.mark.asyncio
+async def test_vague_follow_up_is_contextualized_before_searching(monkeypatch):
+    """Reproduces the reported bug: after a conversation about specific
+    named sites, a vague follow-up like "could you find more details" was
+    searched against SharePoint verbatim instead of being resolved into a
+    standalone query using the prior turns."""
+    from backend.models.chat import ChatMessage
+
+    service = LangGraphRAGService()
+    search_calls: list[str] = []
+
+    async def fake_contextualize(question, history=None):
+        assert question == "could you find more details"
+        assert history and "neilstown" in history[0].content.lower()
+        return "Neilstown Ronanstown details"
+
+    async def fake_classify(question: str) -> bool:
+        assert question == "Neilstown Ronanstown details"
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        search_calls.append(query)
+        return []
+
+    async def fake_generate_answer(question, context, history=None):
+        return "no relevant documents found"
+
+    async def fake_clarification(question, attempted_queries, history=None):
+        return "Could you share a document name or reference number?"
+
+    monkeypatch.setattr(service.llm, "contextualize_query", fake_contextualize)
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+
+    history = [
+        ChatMessage(role="user", content="compare neilstown and ronanstown for me"),
+        ChatMessage(role="assistant", content="Neilstown scored 61.78, Ronanstown 61.22..."),
+    ]
+    response = await service.answer_question(
+        USER_A, "could you find more details", history=history
+    )
+
+    assert search_calls[0] == "Neilstown Ronanstown details"
+    assert response.retrieval_attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_first_turn_question_skips_contextualization(monkeypatch):
+    """No conversation history yet -> nothing to resolve against, so the
+    contextualization call should be skipped entirely rather than paying
+    for (and risking) an LLM call with nothing useful to do."""
+    service = LangGraphRAGService()
+
+    async def fail_if_called(question, history=None):
+        raise AssertionError("contextualize_query should not be called with no history")
+
+    async def fake_classify(question: str) -> bool:
+        return True
+
+    async def fake_search(user, query, max_results=8):
+        return []
+
+    async def fake_generate_answer(question, context, history=None):
+        return "no relevant documents found"
+
+    async def fake_clarification(question, attempted_queries, history=None):
+        return "Could you share a document name or reference number?"
+
+    monkeypatch.setattr(service.llm, "contextualize_query", fail_if_called)
+    monkeypatch.setattr(service.llm, "classify_needs_retrieval", fake_classify)
+    monkeypatch.setattr(service.sharepoint, "search", fake_search)
+    monkeypatch.setattr(service.llm, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(service.llm, "generate_clarification", fake_clarification)
+
+    response = await service.answer_question(USER_A, "what are the coordinates")
+    assert response.retrieval_attempts >= 1
 
 
 @pytest.mark.asyncio
